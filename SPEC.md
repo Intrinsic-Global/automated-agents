@@ -452,6 +452,13 @@ Fields:
   - Default: `20`
   - Limits the number of coding-agent turns within one worker session.
   - Invalid values fail configuration validation.
+- `max_continuation_retries` (non-negative integer)
+  - Default: `3`
+  - Limits consecutive normal-exit continuation retries for one issue while it remains active.
+    `0` disables continuation retries.
+  - When the limit is exceeded, the orchestrator blocks further dispatch for that issue until it
+    leaves active states (or its routing labels are removed).
+  - Invalid values fail configuration validation.
 - `max_retry_backoff_ms` (integer)
   - Default: `300000` (5 minutes)
   - Changes SHOULD be re-applied at runtime and affect future retry scheduling.
@@ -622,6 +629,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
+- `agent.max_continuation_retries`: integer, default `3`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
@@ -672,6 +680,9 @@ Important nuance:
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
+- Consecutive normal-exit continuations are capped by `agent.max_continuation_retries`. When the
+  cap is exceeded, the orchestrator blocks the issue instead of dispatching again, which prevents an
+  issue that never leaves an active state from consuming tokens indefinitely.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -703,7 +714,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Remove running entry.
   - Update aggregate runtime totals.
   - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+    turn loop, up to `agent.max_continuation_retries`.
+  - If the continuation limit is exceeded, block the issue instead of scheduling another retry.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.

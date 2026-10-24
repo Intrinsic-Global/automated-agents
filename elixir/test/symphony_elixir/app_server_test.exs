@@ -76,7 +76,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "turn timeout resets on stream updates and fires after silence" do
+  test "turn timeout is an absolute deadline even when stream updates continue" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -131,7 +131,7 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "stream updates", issue)
+      assert {:error, :turn_timeout} = AppServer.run(workspace, "stream updates", issue)
 
       File.write!(codex_binary, """
       #!/bin/sh

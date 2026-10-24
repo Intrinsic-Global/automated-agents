@@ -366,41 +366,57 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+    deadline = System.monotonic_time(:millisecond) + Config.settings!().codex.turn_timeout_ms
+
     receive_loop(
       port,
       on_message,
-      Config.settings!().codex.turn_timeout_ms,
+      deadline,
       "",
       tool_executor,
       auto_approve_requests
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+  defp receive_loop(port, on_message, deadline, pending_line, tool_executor, auto_approve_requests) do
+    remaining_ms = max(0, deadline - System.monotonic_time(:millisecond))
 
-      {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(
-          port,
-          on_message,
-          timeout_ms,
-          pending_line <> to_string(chunk),
-          tool_executor,
-          auto_approve_requests
-        )
+    if remaining_ms == 0 do
+      {:error, :turn_timeout}
+    else
+      receive do
+        {^port, {:data, {:eol, chunk}}} ->
+          complete_line = pending_line <> to_string(chunk)
 
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :turn_timeout}
+          handle_incoming(
+            port,
+            on_message,
+            complete_line,
+            deadline,
+            tool_executor,
+            auto_approve_requests
+          )
+
+        {^port, {:data, {:noeol, chunk}}} ->
+          receive_loop(
+            port,
+            on_message,
+            deadline,
+            pending_line <> to_string(chunk),
+            tool_executor,
+            auto_approve_requests
+          )
+
+        {^port, {:exit_status, status}} ->
+          {:error, {:port_exit, status}}
+      after
+        remaining_ms ->
+          {:error, :turn_timeout}
+      end
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(port, on_message, data, deadline, tool_executor, auto_approve_requests) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -440,7 +456,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           payload,
           payload_string,
           method,
-          timeout_ms,
+          deadline,
           tool_executor,
           auto_approve_requests
         )
@@ -456,7 +472,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -473,7 +489,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
     end
   end
 
@@ -496,7 +512,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          payload,
          payload_string,
          method,
-         timeout_ms,
+         deadline,
          tool_executor,
          auto_approve_requests
        ) do
@@ -523,7 +539,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
 
       :approval_required ->
         emit_message(
@@ -557,7 +573,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
         end
     end
   end

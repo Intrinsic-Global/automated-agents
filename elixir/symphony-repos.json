@@ -1,0 +1,165 @@
+{
+  "schema": "symphony-repo-scopes.v1",
+  "description": "Versioned repository scopes for Symphony admission. PRF remains the default and is unchanged when SYMPHONY_REPO_CONFIG is unset.",
+  "repos": {
+    "prf": {
+      "remote": "https://github.com/protocol-robustness/protocol-robustness-framework.git",
+      "jj_repo": "$PRF_JJ_REPO",
+      "producer_root": "$PRF_PRODUCER_ROOT",
+      "reviewer_root": "$PRF_REVIEWER_ROOT",
+      "staging_bookmark": "agent-c-staging",
+      "bookmark_prefix": "symphony/",
+      "workspace_prefix": "symphony-stage",
+      "validation": [
+        [
+          "bb",
+          "validate"
+        ],
+        [
+          "bb",
+          "backstop"
+        ]
+      ],
+      "issues": {
+        "PRO-94": [
+          "docs/specs/NETWORK_CHECKPOINT_PROTOCOL_V1.md",
+          "src/resolver_sim/hash/canonical.clj",
+          "src/resolver_sim/network/checkpoint.clj",
+          "test/resolver_sim/network/checkpoint_fresh_process.clj",
+          "test/resolver_sim/network/checkpoint_test.clj"
+        ],
+        "PRO-48": [
+          "docs/deployments/BOUNDED_CONFIGURATION_REMAINING_PLAN.md",
+          "etc/deployments/",
+          "test/resolver_sim/configuration_review_candidate_v4_test.clj"
+        ],
+        "PRO-88": [
+          "src/resolver_sim/adapters/sew/",
+          "src/resolver_sim/economics/",
+          "src/resolver_sim/protocols/sew/",
+          "protocols_src/resolver_sim/protocols/sew/",
+          "protocols_src/test/resolver_sim/protocols/sew/",
+          "test/resolver_sim/adapters/sew/",
+          "test/resolver_sim/economics/",
+          "test/resolver_sim/protocols/sew/",
+          "examples/assured-operations/",
+          "docs/",
+          "CHANGELOG.md"
+        ],
+        "PRO-89": [
+          "src/resolver_sim/economics/",
+          "src/resolver_sim/pro_rata/",
+          "test/resolver_sim/economics/",
+          "test/resolver_sim/pro_rata/",
+          "examples/assured-operations/",
+          "docs/",
+          "CHANGELOG.md"
+        ]
+      },
+      "format_command": [
+        "bb",
+        "fmt"
+      ]
+    },
+    "prf-evm": {
+      "remote": "https://github.com/protocol-robustness/prf-evm.git",
+      "jj_repo": "$PRF_EVM_JJ_REPO",
+      "producer_root": "$PRF_REPO_PRODUCER_ROOT",
+      "reviewer_root": "$PRF_REPO_REVIEWER_ROOT",
+      "staging_bookmark": "symphony-staging",
+      "bookmark_prefix": "symphony/",
+      "workspace_prefix": "symphony-stage-prf-evm",
+      "validation": [
+        [
+          "env",
+          "PNPM_HOME=/tmp/pnpm-home",
+          "XDG_DATA_HOME=/tmp/pnpm-data",
+          "XDG_CACHE_HOME=/tmp/pnpm-cache",
+          "pnpm",
+          "bounded-profile:test"
+        ],
+        [
+          "env",
+          "PNPM_HOME=/tmp/pnpm-home",
+          "XDG_DATA_HOME=/tmp/pnpm-data",
+          "XDG_CACHE_HOME=/tmp/pnpm-cache",
+          "pnpm",
+          "bounded-profile:validate"
+        ]
+      ],
+      "issues": {
+        "PRO-46": [
+          "CHANGELOG.md",
+          "config/bounded-successor-entitlement.profile.v1.json",
+          "docs/bounded-successor-configuration-profile.md",
+          "package.json",
+          "script/DeployGateEEntitlementOptionA.s.sol",
+          "scripts/bounded-successor-profile.mjs",
+          "scripts/deploy-gate-e-entitlement.sh",
+          "scripts/test-bounded-successor-profile.mjs",
+          "test/PrfGenesis.t.sol"
+        ]
+      }
+    },
+    "prf-site": {
+      "remote": "https://github.com/protocol-robustness/prf-site.git",
+      "jj_repo": "$PRF_SITE_JJ_REPO",
+      "producer_root": "$PRF_REPO_PRODUCER_ROOT",
+      "reviewer_root": "$PRF_REPO_REVIEWER_ROOT",
+      "staging_bookmark": "symphony-staging",
+      "bookmark_prefix": "symphony/",
+      "workspace_prefix": "symphony-stage-prf-site",
+      "validation": [
+        [
+          "env",
+          "PNPM_HOME=/tmp/pnpm-home",
+          "XDG_DATA_HOME=/tmp/pnpm-data",
+          "XDG_CACHE_HOME=/tmp/pnpm-cache",
+          "pnpm",
+          "verify:demos"
+        ],
+        [
+          "env",
+          "PNPM_HOME=/tmp/pnpm-home",
+          "XDG_DATA_HOME=/tmp/pnpm-data",
+          "XDG_CACHE_HOME=/tmp/pnpm-cache",
+          "pnpm",
+          "typecheck"
+        ],
+        [
+          "env",
+          "PNPM_HOME=/tmp/pnpm-home",
+          "XDG_DATA_HOME=/tmp/pnpm-data",
+          "XDG_CACHE_HOME=/tmp/pnpm-cache",
+          "pnpm",
+          "build"
+        ]
+      ],
+      "issues": {}
+    },
+    "protocol-deployments": {
+      "remote": "https://github.com/protocol-robustness/protocol-deployments.git",
+      "jj_repo": "$PROTOCOL_DEPLOYMENTS_JJ_REPO",
+      "producer_root": "$PRF_REPO_PRODUCER_ROOT",
+      "reviewer_root": "$PRF_REPO_REVIEWER_ROOT",
+      "staging_bookmark": "symphony-staging",
+      "bookmark_prefix": "symphony/",
+      "workspace_prefix": "symphony-stage-protocol-deployments",
+      "validation": [
+        [
+          "pnpm",
+          "test"
+        ]
+      ],
+      "issues": {}
+    }
+  },
+  "issue_repos": {
+    "PRO-94": "prf",
+    "PRO-48": "prf",
+    "PRO-88": "prf",
+    "PRO-89": "prf",
+    "PRO-46": "prf-evm",
+    "PRO-20": "prf-site"
+  }
+}

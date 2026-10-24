@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+ENV_FILE=${SYMPHONY_ENV_FILE:-$SCRIPT_DIR/.env}
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+unset LINEAR_ASSIGNEE
+
+[[ -n "${LINEAR_API_KEY:-}" ]] || {
+  echo "LINEAR_API_KEY is missing" >&2
+  exit 1
+}
+
+CODE_ROOT="${CODE_ROOT:-$HOME/Code}"
+WORKTREE="${SYMPHONY_ELIXIR_ROOT:-$SCRIPT_DIR}"
+CODE="${CODE_ROOT}"
+SYMPHONY_WORKSPACES_ROOT="${SYMPHONY_WORKSPACES_ROOT:-$CODE/.symphony-workspaces}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# Build the sandbox command from paths that exist on the host.  In particular,
+# bwrap's bind options always need both a source and a destination; the local
+# bin mount used to omit the destination and shifted all following arguments.
+args=(
+    --new-session
+    --unshare-pid
+    --unshare-uts
+    --unshare-cgroup
+)
+
+# Create the home/runtime skeleton before adding mounts below it.
+args+=(--dir "$HOME")
+args+=(--dir "$HOME/.local")
+args+=(--dir "$HOME/.local/share")
+args+=(--dir "$HOME/.config")
+args+=(--dir "$HOME/.cargo")
+args+=(--dir "$HOME/.cache")
+args+=(--dir "$HOME/.codex")
+if [[ ! -e /run ]]; then
+    args+=(--dir /run)
+fi
+if [[ ! -e /run/user ]]; then
+    args+=(--dir /run/user)
+fi
+
+bind_ro() {
+    local source="$1" destination="${2:-$1}"
+    if [[ -e "$source" ]]; then
+        args+=(--ro-bind "$source" "$destination")
+    fi
+}
+
+bind_rw() {
+    local source="$1" destination="${2:-$1}"
+    if [[ -e "$source" ]]; then
+        args+=(--bind "$source" "$destination")
+    fi
+}
+
+for path in /usr /bin /lib /lib64 /run /etc /sys; do
+    bind_ro "$path"
+done
+bind_ro /etc/resolv.conf
+bind_ro "$HOME/.local/bin"
+if [[ -n "${CODEX_BIN:-}" ]]; then
+    case "$CODEX_BIN" in
+        "$HOME/.local/bin/"*) ;;
+        *) bind_ro "$CODEX_BIN" ;;
+    esac
+fi
+bind_ro "$HOME/bin"
+if [[ -x "$HOME/bin/bb" ]]; then
+    symphony_tools="$HOME/.local/share/symphony-tools"
+    mkdir -p "$symphony_tools"
+    ln -sfn "$HOME/bin/bb" "$symphony_tools/bb"
+    args+=(--ro-bind "$symphony_tools" "$HOME/.symphony-tools")
+fi
+bind_ro "$HOME/.cargo/bin"
+# Codex needs its host configuration and login state to load the configured
+# Linear MCP server. Keep both files read-only inside the outer sandbox.
+bind_ro "$HOME/.codex/config.toml"
+bind_ro "$HOME/.codex/auth.json"
+# The ~/.local/bin/codex symlink resolves into this versioned package tree.
+bind_ro "$HOME/.codex/packages"
+bind_rw "$HOME/.m2"
+bind_rw "$HOME/.gitlibs"
+bind_rw "$HOME/.clojure"
+bind_rw "$HOME/.deps.clj"
+bind_rw "$HOME/.config/jj"
+bind_ro "$HOME/.sdkman"
+bind_ro "$HOME/.nvm"
+bind_ro "$HOME/.foundry"
+bind_ro "$HOME/.halmos"
+bind_rw "$HOME/.local/share/mise"
+bind_rw "$HOME/.cache/mise"
+bind_rw /opt/pnpm-store
+bind_rw /opt/pnpm-cache
+args+=(--dir "$CODE")
+bind_rw "$CODE"
+# Optional existing review workspaces can be protected with a colon-separated
+# list in the ignored local environment file.
+if [[ -n "${SYMPHONY_READONLY_WORKSPACES:-}" ]]; then
+    IFS=: read -r -a review_workspaces <<< "$SYMPHONY_READONLY_WORKSPACES"
+    for review_workspace in "${review_workspaces[@]}"; do
+    bind_ro "$review_workspace"
+    done
+fi
+bind_ro /tmp/.X11-unix
+
+args+=(
+    --proc /proc
+    --dev /dev
+)
+if [[ -e /dev/dri ]]; then
+    args+=(--dev-bind /dev/dri /dev/dri)
+fi
+
+[[ -d "$WORKTREE" ]] || { echo "Missing Symphony worktree: $WORKTREE" >&2; exit 1; }
+command -v bwrap >/dev/null || { echo "bubblewrap (bwrap) is required" >&2; exit 1; }
+command -v mise >/dev/null || { echo "mise is required" >&2; exit 1; }
+
+usage() {
+    echo "Usage: ./symphony [both|coding|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer]" >&2
+    exit 2
+}
+
+role="${1:-both}"
+[[ "$#" -le 1 ]] || usage
+case "$role" in
+    both|coding|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer) ;;
+    *) usage ;;
+esac
+
+run_role() {
+    local selected_role="$1"
+    local workflow_file workspace_root
+
+    case "$selected_role" in
+        coding)
+            workflow_file="$WORKTREE/WORKFLOW.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-coding"
+            ;;
+        coding-pro-rata)
+            workflow_file="$WORKTREE/WORKFLOW.coding.pro-rata.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-coding-pro-rata"
+            ;;
+        coding-protected-ops)
+            workflow_file="$WORKTREE/WORKFLOW.coding.protected-ops.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-coding-protected-ops"
+            ;;
+        coding-researcher-challenges)
+            workflow_file="$WORKTREE/WORKFLOW.coding.researcher-challenges.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-coding-researcher-challenges"
+            ;;
+        reviewer)
+            workflow_file="$WORKTREE/WORKFLOW.reviewer.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-reviewer"
+            ;;
+        reviewer-pro-rata)
+            workflow_file="$WORKTREE/WORKFLOW.reviewer.pro-rata.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-reviewer"
+            ;;
+        reviewer-protected-ops)
+            workflow_file="$WORKTREE/WORKFLOW.reviewer.protected-ops.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-repo-reviewer-v1"
+            ;;
+        reviewer-researcher-challenges)
+            workflow_file="$WORKTREE/WORKFLOW.reviewer.researcher-challenges.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-reviewer-v1"
+            ;;
+        forensic-coding)
+            workflow_file="$WORKTREE/WORKFLOW.forensic.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-forensic-coding"
+            ;;
+        forensic-reviewer)
+            workflow_file="$WORKTREE/WORKFLOW.forensic-reviewer.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-forensic-reviewer"
+            ;;
+        *)
+            echo "Unknown Symphony role: $selected_role" >&2
+            return 2
+            ;;
+    esac
+
+    local -a process_args=(
+        "${args[@]}"
+        --setenv DISPLAY "${DISPLAY:-}"
+        --setenv XDG_RUNTIME_DIR "$RUNTIME_DIR"
+        --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=$RUNTIME_DIR/bus"
+        --setenv CODEX_HOME "$HOME/.codex"
+        --setenv LINEAR_API_KEY "$LINEAR_API_KEY"
+        --setenv SYMPHONY_ELIGIBILITY_ENFORCE 1
+        --setenv SYMPHONY_JJ_SOURCE_REPO "${SYMPHONY_JJ_SOURCE_REPO:-}"
+        --setenv SYMPHONY_JJ_REPO "${SYMPHONY_JJ_REPO:-}"
+        --setenv SYMPHONY_ALLOWED_PATHS "${SYMPHONY_ALLOWED_PATHS:-}"
+        --setenv SYMPHONY_BB "$HOME/bin/bb"
+        --setenv PRF_EVM_ROOT "${PRF_EVM_ROOT:-}"
+        --setenv CODE_ROOT "$CODE_ROOT"
+        --setenv SYMPHONY_REPO_ROOT "${SYMPHONY_REPO_ROOT:-}"
+        --setenv SYMPHONY_ELIXIR_ROOT "$WORKTREE"
+        --setenv SYMPHONY_WORKSPACES_ROOT "$SYMPHONY_WORKSPACES_ROOT"
+        --setenv SYMPHONY_REPO_CONFIG "${SYMPHONY_REPO_CONFIG:-}"
+        --setenv SYMPHONY_ELIGIBILITY_SCRIPT "${SYMPHONY_ELIGIBILITY_SCRIPT:-$WORKTREE/scripts/symphony_eligibility.py}"
+        --setenv SYMPHONY_STATE_DIR "${SYMPHONY_STATE_DIR:-}"
+        --setenv CODEX_BIN "${CODEX_BIN:-codex}"
+        --setenv SEW_SIMULATION_ROOT "${SEW_SIMULATION_ROOT:-}"
+        --setenv SEW_SIMULATION_JJ_ROOT "${SEW_SIMULATION_JJ_ROOT:-}"
+        --setenv SEW_SIMULATION_GIT_ROOT "${SEW_SIMULATION_GIT_ROOT:-}"
+        --setenv PATH "$HOME/.symphony-tools:$PATH"
+        --setenv SYMPHONY_JJ_SOURCE_REVISION agent-c-staging
+        --setenv SYMPHONY_WORKSPACE_ROOT "$workspace_root"
+        --setenv SYMPHONY_JJ_WORKSPACE_ROOT "$workspace_root"
+        --setenv XDG_CURRENT_DESKTOP "${XDG_CURRENT_DESKTOP:-}"
+        --setenv GTK_THEME "${GTK_THEME:-}"
+        --chdir "$WORKTREE"
+    )
+
+    exec bwrap "${process_args[@]}" \
+        mise exec -- ./bin/symphony \
+        --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+        --logs-root "${SYMPHONY_LOGS_ROOT:-$CODE/.symphony-logs}/$selected_role" \
+        "$workflow_file"
+}
+
+if [[ "$role" != "both" ]]; then
+    run_role "$role"
+fi
+
+run_role coding &
+coding_pid=$!
+run_role reviewer &
+reviewer_pid=$!
+
+# shellcheck disable=SC2317
+cleanup() {
+    trap - EXIT INT TERM HUP
+    kill "$coding_pid" "$reviewer_pid" 2>/dev/null || true
+    wait "$coding_pid" 2>/dev/null || true
+    wait "$reviewer_pid" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM HUP
+set +e
+wait -n "$coding_pid" "$reviewer_pid"
+status=$?
+exit "$status"
+

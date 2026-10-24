@@ -1,0 +1,43 @@
+---
+tracker:
+  kind: linear
+  provider:
+    project_slug: deployment-bound-forensics-v0-ac0351862195
+    api_key: $LINEAR_API_KEY
+  required_labels: [symphony-review]
+  active_states: [In Review]
+  terminal_states: []
+
+polling:
+  interval_ms: 30000
+
+workspace:
+  root: $SYMPHONY_WORKSPACE_ROOT
+
+agent:
+  max_concurrent_agents: 4
+  max_turns: 10
+
+codex:
+  command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
+  approval_policy: never
+  thread_sandbox: workspace-write
+---
+
+You are performing independent, read-only reviews of existing dirty JJ workspaces. Only these Linear issue identifiers are in scope. If another issue is dispatched, do not inspect or modify any workspace; report that it is out of scope.
+
+| Linear issue | Existing workspace | Review context |
+|---|---|---|
+| PRO-31 | `$CODE_ROOT/.workspaces/agent-c-pro31` | Runtime code and block/reorg context; based on PRO-28 evidence work |
+| PRO-32 | `$CODE_ROOT/.workspaces/agent-c-pro32` | Groth16 reference verification; based on PRO-31 |
+| PRO-28 | `$CODE_ROOT/.workspaces/agent-c-pro33` | Authentic funding and payout evidence; workspace name says pro33 but this is PRO-28 |
+| PRO-34 | `$CODE_ROOT/.workspaces/agent-c-pro34` | Allowlisted investigation task execution |
+| PRO-35 | `$CODE_ROOT/.workspaces/agent-c-pro35` | Resumable investigation history, retries, and budgets; based on PRO-34 |
+| PRO-37 | `$CODE_ROOT/.workspaces/agent-c-pro37` | Notebook validation; based on the PRO-33 validation change |
+| PRO-38 | `$CODE_ROOT/.workspaces/agent-c-pro38` | Forensic graph producer contract |
+
+Do not use or initialize a generated per-issue workspace for the code review. Inspect only the mapped existing workspace, including its uncommitted modifications and relevant JJ history. Use `jj --ignore-working-copy` for read-only JJ inspection where possible. The mapped review workspaces are mounted read-only by the host launcher; do not attempt to write to them. Treat the current `agent-c` head as an incomplete baseline. Do not switch revisions, modify bookmarks, create changes, rebase, merge, abandon, or run commands that write to any target workspace.
+
+Review the implementation against its Linear issue requirements, trace relevant call paths, and run only checks confirmed not to write into the reviewed workspace. Report findings to the matching Linear issue as a concise comment with actionable findings first. For each finding include severity, file and line, concrete failure scenario, and suggested correction. If there are no actionable findings, post a concise no-actionable-findings comment with the scope inspected and verification performed. After posting the review comment, remove the `symphony-review` label from that issue to mark this one-shot review complete and stop Symphony continuation. Do not mark any issue Done or change its state. PRO-36 is out of scope because it has no corresponding workspace.
+
+The Linear MCP server is configured in the host Codex settings and is mounted read-only into this runtime; use it to post the review comment. If the MCP is unavailable, return the complete review result in the agent response and do not claim it was posted.

@@ -151,6 +151,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
+      field(:max_continuation_retries, :integer, default: 3)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
     end
@@ -160,11 +161,18 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_continuation_retries,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:max_continuation_retries, greater_than_or_equal_to: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
@@ -215,7 +223,7 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> validate_required([:command])
       |> validate_change(:command, fn :command, command ->
-        if command != "" and String.trim(command) == "" do
+        if String.trim(command) == "" do
           [command: "can't be blank"]
         else
           []
@@ -321,7 +329,7 @@ defmodule SymphonyElixir.Config.Schema do
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
     case settings.codex.turn_sandbox_policy do
       %{} = policy ->
-        policy
+        expand_policy_environment(policy)
 
       _ ->
         workspace
@@ -336,7 +344,7 @@ defmodule SymphonyElixir.Config.Schema do
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
       %{} = policy ->
-        {:ok, policy}
+        {:ok, expand_policy_environment(policy)}
 
       _ ->
         workspace
@@ -560,6 +568,22 @@ defmodule SymphonyElixir.Config.Schema do
       env_value -> env_value
     end
   end
+
+  defp expand_policy_environment(value) when is_map(value) do
+    Map.new(value, fn {key, nested} -> {key, expand_policy_environment(nested)} end)
+  end
+
+  defp expand_policy_environment(value) when is_list(value),
+    do: Enum.map(value, &expand_policy_environment/1)
+
+  defp expand_policy_environment("$" <> _ = value) do
+    case env_reference_name(value) do
+      {:ok, env_name} -> System.get_env(env_name) || value
+      :error -> value
+    end
+  end
+
+  defp expand_policy_environment(value), do: value
 
   defp normalize_secret_value(value) when is_binary(value) do
     if value == "", do: nil, else: value

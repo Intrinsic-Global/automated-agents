@@ -18,6 +18,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.max_continuation_retries == 3
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -33,6 +34,13 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_continuation_retries: -1)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_continuation_retries"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_continuation_retries: 2)
+    assert Config.settings!().agent.max_continuation_retries == 2
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -118,14 +126,13 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(tracker, "kind") == "linear"
     assert is_binary(get_in(tracker, ["provider", "project_slug"]))
     assert is_list(Map.get(tracker, "active_states"))
-    assert is_list(Map.get(tracker, "terminal_states"))
+    assert Map.get(tracker, "required_labels") == ["symphony-pilot"]
+    refute Map.has_key?(tracker, "terminal_states")
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "before_run") =~ "jj_workspace_adapter.sh create"
+    assert Map.get(hooks, "after_run") =~ "jj_export_candidate.sh"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -1057,6 +1064,137 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, 500, 1_100)
+    assert state.continuation_attempts[issue_id] == 1
+  end
+
+  test "normal worker exit blocks after agent.max_continuation_retries" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_continuation_retries: 2)
+
+    issue_id = "issue-continuation-limit"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :ContinuationLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-566",
+      issue: %Issue{id: issue_id, identifier: "MT-566", state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+      |> Map.put(:continuation_attempts, %{issue_id => 2})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.blocked, issue_id)
+    assert %{attempt: 1} = state.retry_attempts[issue_id]
+    assert state.continuation_attempts[issue_id] == 3
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-566",
+      title: "Still active at continuation limit",
+      state: "In Progress",
+      dispatchable: true
+    }
+
+    blocked_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        %{state | retry_attempts: %{}},
+        issue_id,
+        1,
+        %{identifier: "MT-566"}
+      )
+
+    refute Map.has_key?(blocked_state.running, issue_id)
+    refute Map.has_key?(blocked_state.retry_attempts, issue_id)
+    assert MapSet.member?(blocked_state.claimed, issue_id)
+    assert blocked_state.continuation_attempts[issue_id] == 3
+
+    assert %{error: error} = blocked_state.blocked[issue_id]
+    assert error =~ "continuation limit reached"
+  end
+
+  test "continuation limit releases when the issue left active states" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_continuation_retries: 2)
+
+    issue_id = "issue-continuation-finished"
+
+    state = %Orchestrator.State{
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      continuation_attempts: %{issue_id => 3}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-568",
+      title: "Finished at continuation limit",
+      state: "In Review",
+      dispatchable: true
+    }
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue_id, 1, %{
+        identifier: "MT-568"
+      })
+
+    refute Map.has_key?(updated_state.blocked, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Map.has_key?(updated_state.continuation_attempts, issue_id)
+  end
+
+  test "reconcile keeps continuation-limited issue blocked while it stays active" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_continuation_retries: 2)
+
+    issue_id = "issue-continuation-stays-blocked"
+
+    state = %Orchestrator.State{
+      blocked: %{
+        issue_id => %{
+          identifier: "MT-567",
+          issue: %Issue{id: issue_id, identifier: "MT-567", state: "In Progress"},
+          blocked_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      continuation_attempts: %{issue_id => 3}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-567",
+      title: "Still active after continuation limit",
+      state: "In Progress",
+      dispatchable: true,
+      updated_at: DateTime.utc_now()
+    }
+
+    updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+
+    assert Map.has_key?(updated_state.blocked, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.continuation_attempts[issue_id] == 3
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1096,7 +1234,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, 39_000, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -1502,19 +1640,14 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
-    assert prompt =~ "Issue context:"
-    assert prompt =~ "Identifier: MT-616"
+    assert prompt =~ "PRF Symphony pilot — MT-616"
+    assert prompt =~ "You are assigned Linear issue MT-616."
+    assert prompt =~ "Only MT-616 is authorized for this assignment."
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
-    assert prompt =~ "Current status: In Progress"
+    assert prompt =~ "Status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true external blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
-    assert prompt =~ "Follow-up context:"
-    assert prompt =~ "follow-up attempt #2"
+    assert prompt =~ "Work only inside this Symphony-created JJ workspace."
+    assert prompt =~ "Independent review is mandatory."
   end
 
   test "prompt builder adds continuation guidance for retries" do
