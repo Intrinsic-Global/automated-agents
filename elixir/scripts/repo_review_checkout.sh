@@ -36,24 +36,26 @@ case "$action" in
   before)
     cd "$workspace"
     test "$(git rev-parse --is-inside-work-tree)" = true
-    rm -f ./review-decision.json
+    if [[ -f ./review-decision.json ]]; then
+      archive_root="$SYMPHONY_WORKSPACES_ROOT/.symphony-review-decisions/$issue"
+      mkdir -p "$archive_root"
+      mv ./review-decision.json "$archive_root/review-decision.$(date -u +%Y%m%dT%H%M%SZ).$$.json"
+    fi
+    [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+      printf 'repo-scoped reviewer: workspace has uncommitted changes; preserving it for reconciliation: %s\n' "$workspace" >&2
+      exit 1
+    }
     src="$producer_root/$issue"
     if git -C "$src" rev-parse --verify "refs/heads/symphony/$issue" >/dev/null 2>&1; then
       git fetch --no-tags "$src" "+refs/heads/symphony/$issue:refs/remotes/producer/$issue"
       git checkout -q --detach "refs/remotes/producer/$issue"
-      git reset -q --hard "refs/remotes/producer/$issue"
     else
       printf 'repo-scoped reviewer: no producer candidate for %s at %s\n' "$issue" "$src" >&2
     fi
-    state_dir=${SYMPHONY_STATE_DIR:-$SYMPHONY_WORKSPACES_ROOT/.symphony-state}
     eligibility_script=${SYMPHONY_ELIGIBILITY_SCRIPT:-$script_dir/symphony_eligibility.py}
-    if [[ -f "$state_dir/issues/$issue.json" ]]; then
-      if ! python3 "$eligibility_script" check --issue "$issue" --phase review; then
-        printf 'repo-scoped reviewer: eligibility review handoff rejected for %s\n' "$issue" >&2
-        exit 1
-      fi
-    else
-      printf 'repo-scoped reviewer: no eligibility state for %s; legacy handoff allowed (run workspace adapter to record it)\n' "$issue" >&2
+    if ! python3 "$eligibility_script" check --issue "$issue" --phase review; then
+      printf 'repo-scoped reviewer: eligibility review handoff rejected for %s\n' "$issue" >&2
+      exit 1
     fi
     ;;
   *)

@@ -11,14 +11,9 @@ if [[ -f "$env_file" ]]; then
 fi
 
 issue=$(basename "$PWD")
-state_dir=${SYMPHONY_STATE_DIR:-$SYMPHONY_WORKSPACES_ROOT/.symphony-state}
 eligibility_script=${SYMPHONY_ELIGIBILITY_SCRIPT:-$script_dir/symphony_eligibility.py}
 
-if [[ -f "$state_dir/issues/$issue.json" ]]; then
-  if ! python3 "$eligibility_script" check --issue "$issue" --phase review; then
-    printf 'review handoff rejected by eligibility for %s\n' "$issue" >&2
-    exit 1
-  fi
-else
-  printf 'review handoff check skipped for %s: no eligibility state yet (legacy handoff)\n' "$issue" >&2
+if ! python3 "$eligibility_script" check --issue "$issue" --phase review; then
+  printf 'review handoff rejected by eligibility for %s\n' "$issue" >&2
+  exit 1
 fi

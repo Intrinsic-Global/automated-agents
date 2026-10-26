@@ -5,13 +5,15 @@ import json
 import os
 from pathlib import Path
 import shutil
-import re
 import subprocess
 import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from local_env import load_local_env
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from symphony_preflight import ROLE_WORKFLOWS, yaml as preflight_yaml
 
 load_local_env()
 
@@ -49,6 +51,7 @@ def main():
         check('file:' + str(path), path.exists(), 'present' if path.exists() else 'missing')
 
     check('env:LINEAR_API_KEY', bool(os.environ.get('LINEAR_API_KEY')), 'set' if os.environ.get('LINEAR_API_KEY') else 'missing')
+    check('dependency:PyYAML', preflight_yaml is not None, 'available' if preflight_yaml is not None else 'missing')
 
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -75,14 +78,21 @@ def main():
     except Exception as exc:
         check('systemd_scopes', False, str(exc))
 
+    lanes = {'configured': [], 'running': [], 'inactive': []}
     try:
-        ps = subprocess.run(['ps', '-eo', 'args'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        counts = {}
-        for line in ps.stdout.splitlines():
-            match = re.search(r'WORKFLOW[^ ]*\.md', line)
-            if line.strip().startswith('./bin/symphony') and match:
-                counts[match.group(0)] = counts.get(match.group(0), 0) + 1
-        duplicates = {name: count for name, count in counts.items() if count > 1}
+        worktree = Path(os.environ.get('SYMPHONY_ELIXIR_ROOT', Path(__file__).resolve().parents[1])).resolve()
+        processes = subprocess.run(['ps', '-eo', 'pid=,args='], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        lane_processes = {}
+        for role, workflow_name in ROLE_WORKFLOWS.items():
+            workflow = worktree / workflow_name
+            if not workflow.is_file():
+                continue
+            lanes['configured'].append(role)
+            matching = [line for line in processes.stdout.splitlines()
+                        if 'bin/symphony' in line and str(workflow) in line]
+            lane_processes[role] = len(matching)
+            (lanes['running'] if matching else lanes['inactive']).append(role)
+        duplicates = {role: count for role, count in lane_processes.items() if count > 1}
         check('duplicate_workers', not duplicates, json.dumps(duplicates) if duplicates else 'none')
     except Exception as exc:
         check('duplicate_workers', False, str(exc))
@@ -103,6 +113,7 @@ def main():
         'checked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         'errors': errors,
         'checks': checks,
+        'lanes': lanes,
     }
     if args.json:
         print(json.dumps(result, indent=2))

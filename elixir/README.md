@@ -16,7 +16,7 @@ API when enabled in configuration.
 - Elixir 1.19.5 and Erlang/OTP 28 (versions are pinned in `mise.toml`).
 - [mise](https://mise.jdx.dev/) to install the pinned runtimes.
 - Codex CLI and credentials for the configured tracker.
-- Python 3 if eligibility checks are enabled (enabled by default).
+- Python 3 and PyYAML for launcher and eligibility preflights (enabled by default).
 
 ## Set up
 
@@ -59,7 +59,8 @@ A minimal workflow looks like this:
 tracker:
   kind: linear
   provider:
-    project_slug: "your-project-slug"
+    project_slugs:
+      - "your-project-slug"
     api_key: $LINEAR_API_KEY
 workspace:
   root: ~/code/workspaces
@@ -87,10 +88,27 @@ The schema supports tracker selection, workspace paths, hooks, concurrency and r
 policy, logging, and optional server settings. See `../SPEC.md` and
 `lib/symphony_elixir/config/schema.ex` for the complete field definitions.
 
+For PRF lane launches, `./symphony` validates the selected workflow's project, state, routing labels,
+workspace mount, and host tools before launch. It holds a `flock` lock for the lane's workspace root
+so a second systemd, tmux, or manual process cannot own the same lane. PRF workflows retain terminal
+workspaces; clear `.symphony-quarantined` only after reconciling the workspace and passing its
+eligibility preflight. Use `scripts/symphony_eligibility.py clear-quarantine --issue ISSUE
+--candidate SHA` to bind the reconciled candidate, validate its published producer revision and
+staging base, then clear the durable issue quarantine record and workspace markers; do not remove
+markers directly. Quarantine is stored under the configured workspace root even when an attempt
+fails before creating its per-issue workspace, and dispatch skips quarantined issues after restart.
+
+The default coding and reviewer workflows use `excluded_project_slugs`: they accept
+`symphony-pilot` issues from every Linear project except projects assigned to dedicated pro-rata,
+protected-operations, researcher-challenges, and forensic workflows. Those dedicated workflows
+remain restricted to their own project. Use either `project_slug`/`project_slugs` to allow specific
+projects or `excluded_project_slugs` to accept every project except the listed ones.
+
 ## Tracker adapters
 
-- **Linear:** configure `provider.project_slug` and `provider.api_key`; the key defaults to
-  `LINEAR_API_KEY`. Optional assignee routing uses `LINEAR_ASSIGNEE`.
+- **Linear:** configure `provider.project_slugs` (or the legacy single `provider.project_slug`), or
+  `provider.excluded_project_slugs`, and `provider.api_key`; the key defaults to `LINEAR_API_KEY`.
+  Optional assignee routing uses `LINEAR_ASSIGNEE`.
 - **GitHub Issues:** configure `provider.repo` as `owner/repo`; token defaults to `GITHUB_TOKEN`.
   Set active and terminal states explicitly (`open` and `closed`). Pull requests are not dispatched.
 - **Jira Cloud:** configure `provider.base_url`, `email`, `api_token`, and `project_key`; credentials
@@ -98,7 +116,7 @@ policy, logging, and optional server settings. See `../SPEC.md` and
 - **Asana:** configure the provider workspace/project and token; token defaults to `ASANA_ACCESS_TOKEN`.
 - **GitLab:** configure the provider project and token; token defaults to `GITLAB_TOKEN`.
 
-Each adapter scopes issue reads to its configured project or repository. Provider tools may still
+Each adapter scopes issue reads to its configured projects or repository. Provider tools may still
 access anything permitted by the configured credential.
 
 ## Development

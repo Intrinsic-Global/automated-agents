@@ -444,26 +444,7 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
     if staging_tip is None:
         staging_tip = jj_commit(repo, cfg['staging_bookmark'])
     issue_data = linear_data or linear_issue(issue)
-    state_file_exists = state_path(issue, explicit_state_dir).is_file()
     state = load_state(issue, cfg, explicit_state_dir)
-    if phase in ('review', 'stage') and not state_file_exists:
-        if os.environ.get('SYMPHONY_ELIGIBILITY_LEGACY', '1').lower() not in ('0', 'false', 'off', 'no'):
-            return {
-                'schema': 'symphony-eligibility-result.v1',
-                'issue': issue,
-                'phase': phase,
-                'status': 'eligible',
-                'reasons': ['legacy_no_state'],
-                'legacy': True,
-                'staging_bookmark': cfg.get('staging_bookmark'),
-                'staging_tip': staging_tip,
-                'repo': cfg.get('name'),
-                'dependencies': [],
-                'workspace': {'path': None, 'state': 'absent', 'tip': None, 'base': None},
-                'candidate': None,
-                'review': None,
-                'checked_at': now(),
-            }
     if state.get('repo') != cfg.get('name'):
         state['repo'] = cfg.get('name')
     state['staging_bookmark'] = cfg.get('staging_bookmark')
@@ -506,6 +487,29 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
         if not candidate or not RE_SHA.fullmatch(str(candidate)):
             status = 'blocked'
             reasons.append('candidate_missing')
+        else:
+            try:
+                stored_candidate = jj_commit(repo, candidate)
+                if stored_candidate != candidate:
+                    status = 'blocked'
+                    reasons.append('candidate_revision_mismatch')
+            except Exception:
+                status = 'blocked'
+                reasons.append('candidate_missing_from_staging_store')
+
+            producer = Path(cfg.get('producer_root', '')) / issue
+            try:
+                published = run([
+                    'git', '-C', str(producer), 'rev-parse', '--verify',
+                    f'refs/heads/symphony/{issue}',
+                ])
+                if published != candidate:
+                    status = 'blocked'
+                    reasons.append('published_candidate_mismatch')
+            except Exception:
+                status = 'blocked'
+                reasons.append('candidate_not_published')
+
         base = state.get('staging_base') or (state.get('candidate') or {}).get('base')
         if not base:
             status = 'blocked'
@@ -597,6 +601,8 @@ def record_candidate(issue, candidate, base=None, explicit_config=None, explicit
         base = state.get('staging_base')
     if not base or not RE_SHA.fullmatch(str(base)):
         fail('candidate base is unknown; record the workspace first')
+    if candidate != base and not jj_is_ancestor(cfg['jj_repo'], base, candidate):
+        fail(f'candidate {candidate} is not based on the pinned staging base {base}')
 
     def mutate(state):
         prior = (state.get('candidate') or {}).get('sha')
@@ -619,6 +625,39 @@ def record_candidate(issue, candidate, base=None, explicit_config=None, explicit
 
     state = update_state(issue, mutate, cfg, explicit_state_dir)
     return {'issue': issue, 'candidate': state['candidate']}
+
+
+def clear_quarantine(issue, candidate, explicit_config=None, explicit_state_dir=None):
+    record_candidate(
+        issue,
+        candidate,
+        explicit_config=explicit_config,
+        explicit_state_dir=explicit_state_dir,
+    )
+    result = check_phase(
+        issue,
+        'review',
+        explicit_config=explicit_config,
+        explicit_state_dir=explicit_state_dir,
+    )
+    if result['status'] != 'eligible':
+        fail('quarantine release preflight failed: ' + ';'.join(result.get('reasons') or []))
+
+    state = load_state(issue, explicit=explicit_state_dir)
+    workspace = state.get('workspace')
+    if not workspace or not Path(workspace).is_dir():
+        fail('quarantine release requires an existing recorded workspace')
+    quarantine_index = Path(workspace).parent / '.symphony-quarantine' / Path(workspace).name
+    try:
+        quarantine_index.unlink()
+    except FileNotFoundError:
+        pass
+    for marker in ('.symphony-quarantined', '.symphony-bootstrap-failed'):
+        try:
+            (Path(workspace) / marker).unlink()
+        except FileNotFoundError:
+            pass
+    return {'issue': issue, 'candidate': candidate, 'preflight': result, 'quarantine_cleared': True}
 
 
 def record_review(issue, decision_path, reviewer=None, explicit_config=None, explicit_state_dir=None):
@@ -747,6 +786,12 @@ def main(argv=None):
     candidate.add_argument('--base', default=None)
     candidate.set_defaults(func=lambda a: print(json.dumps(record_candidate(
         a.issue, a.candidate, a.base, a.config, a.state_dir), indent=2)))
+
+    clear = sub.add_parser('clear-quarantine')
+    clear.add_argument('--issue', required=True)
+    clear.add_argument('--candidate', required=True)
+    clear.set_defaults(func=lambda a: print(json.dumps(clear_quarantine(
+        a.issue, a.candidate, a.config, a.state_dir), indent=2)))
 
     review = sub.add_parser('record-review')
     review.add_argument('--issue', required=True)

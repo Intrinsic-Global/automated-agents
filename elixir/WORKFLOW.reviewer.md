@@ -2,7 +2,11 @@
 tracker:
   kind: linear
   provider:
-    project_slug: "prf-research-ratification-and-sew-dispute-reference-0a4afbd7f0f1"
+    excluded_project_slugs:
+      - "pro-rata-production-readiness-af3912df6995"
+      - "protected-operations-base-sepolia-b90b18edae8f"
+      - "researcher-challenges-v0-dfe8a65db477"
+      - "deployment-bound-forensics-v0-ac0351862195"
     api_key: $LINEAR_API_KEY
   required_labels:
     - symphony-pilot
@@ -18,6 +22,7 @@ polling:
   interval_ms: 15000
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  cleanup_on_terminal: false
 hooks:
   timeout_ms: 3600000
   after_create: |
@@ -32,13 +37,20 @@ hooks:
     set -eu
     test "$(git rev-parse --is-inside-work-tree)" = true
     test -f protocols_src/resolver_sim/protocols/sew/appeal_bond_projection.clj
-    rm -f ./review-decision.json
     issue=$(basename "$PWD")
+    archive_root="$SYMPHONY_WORKSPACES_ROOT/.symphony-review-decisions/$issue"
+    if [ -f ./review-decision.json ]; then
+      mkdir -p "$archive_root"
+      mv ./review-decision.json "$archive_root/review-decision.$(date -u +%Y%m%dT%H%M%SZ).$$.json"
+    fi
+    test -z "$(git status --porcelain --untracked-files=all)" || {
+      echo "review workspace has uncommitted changes; preserve and reconcile it before reuse" >&2
+      exit 1
+    }
     src=$SYMPHONY_WORKSPACES_ROOT/prf-coder-v2/$issue
     if git -C "$src" rev-parse --verify "refs/heads/symphony/$issue" >/dev/null 2>&1; then
       git fetch --no-tags "$src" "+refs/heads/symphony/$issue:refs/remotes/producer/$issue"
       git checkout -q --detach "refs/remotes/producer/$issue"
-      git reset -q --hard "refs/remotes/producer/$issue"
     fi
     $SYMPHONY_ELIXIR_ROOT/scripts/review_handoff_check.sh
   after_run: |

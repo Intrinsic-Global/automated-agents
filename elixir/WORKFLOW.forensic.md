@@ -12,14 +12,18 @@ tracker:
 
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  cleanup_on_terminal: false
 
 agent:
   max_concurrent_agents: 1
-  max_turns: 6
+  max_turns: 1
+  max_failure_retries: 0
 
 codex:
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
   approval_policy: never
+  turn_timeout_ms: 900000
+  stall_timeout_ms: 300000
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite

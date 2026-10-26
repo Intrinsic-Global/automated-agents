@@ -12,6 +12,7 @@ tracker:
 
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  cleanup_on_terminal: false
 
 agent:
   max_concurrent_agents: 1

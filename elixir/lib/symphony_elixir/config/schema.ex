@@ -52,6 +52,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:endpoint, :string)
       field(:api_key, :string)
       field(:project_slug, :string)
+      field(:project_slugs, {:array, :string}, default: [])
+      field(:excluded_project_slugs, {:array, :string}, default: [])
       field(:assignee, :string)
       field(:provider, :map, default: %{})
       field(:secret_environment_names, {:array, :string}, default: [])
@@ -70,6 +72,8 @@ defmodule SymphonyElixir.Config.Schema do
           :endpoint,
           :api_key,
           :project_slug,
+          :project_slugs,
+          :excluded_project_slugs,
           :assignee,
           :provider,
           :required_labels,
@@ -112,12 +116,13 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:cleanup_on_terminal, :boolean, default: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:root], empty_values: [])
+      |> cast(attrs, [:root, :cleanup_on_terminal], empty_values: [])
     end
   end
 
@@ -152,6 +157,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_continuation_retries, :integer, default: 3)
+      field(:max_failure_retries, :integer, default: 3)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
     end
@@ -165,6 +171,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents,
           :max_turns,
           :max_continuation_retries,
+          :max_failure_retries,
           :max_retry_backoff_ms,
           :max_concurrent_agents_by_state
         ],
@@ -173,6 +180,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_continuation_retries, greater_than_or_equal_to: 0)
+      |> validate_number(:max_failure_retries, greater_than_or_equal_to: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
@@ -445,11 +453,18 @@ defmodule SymphonyElixir.Config.Schema do
           {settings.tracker.active_states, settings.tracker.terminal_states}
       end
 
+    project_slugs = normalized_project_slugs(provider, settings.tracker)
+
+    excluded_project_slugs =
+      normalized_project_slug_list(provider, "excluded_project_slugs", settings.tracker.excluded_project_slugs)
+
     tracker = %{
       settings.tracker
       | endpoint: Map.get(provider, "endpoint", settings.tracker.endpoint),
         api_key: api_key,
-        project_slug: Map.get(provider, "project_slug", settings.tracker.project_slug),
+        project_slug: List.first(project_slugs),
+        project_slugs: project_slugs,
+        excluded_project_slugs: excluded_project_slugs,
         assignee: assignee,
         provider: provider,
         secret_environment_names: Enum.uniq(secret_environment_names),
@@ -469,6 +484,23 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp normalized_project_slugs(provider, tracker) do
+    ([Map.get(provider, "project_slug", tracker.project_slug)] ++
+       List.wrap(Map.get(provider, "project_slugs", tracker.project_slugs)))
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.uniq()
+  end
+
+  defp normalized_project_slug_list(provider, key, fallback) do
+    provider
+    |> Map.get(key, fallback)
+    |> List.wrap()
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.uniq()
   end
 
   defp normalize_keys(value) when is_map(value) do

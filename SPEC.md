@@ -416,6 +416,9 @@ Fields:
   - `~` is expanded.
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
+- `cleanup_on_terminal` (boolean, OPTIONAL)
+  - Default: `true` for compatibility.
+  - When `false`, startup and tracker terminal-state reconciliation MUST preserve workspaces.
 
 #### 5.3.4 `hooks` (object)
 
@@ -617,11 +620,14 @@ not require recognizing or validating extension fields unless that extension is 
 
 - `tracker.kind`: string, REQUIRED, selects one supported adapter
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
+  - Linear `project_slugs` may contain multiple project slug IDs; legacy `project_slug` remains supported.
+  - Linear `excluded_project_slugs` may exclude dedicated projects while routing across every other project. It is mutually exclusive with `project_slug` and `project_slugs`.
 - `tracker.required_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `workspace.cleanup_on_terminal`: boolean, default `true`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -630,6 +636,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_continuation_retries`: integer, default `3`
+- `agent.max_failure_retries`: integer, default `3`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
@@ -740,7 +747,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
-- Startup terminal cleanup removes stale workspaces for issues already in terminal states.
+- Startup terminal cleanup removes stale workspaces for issues already in terminal states only when
+  `workspace.cleanup_on_terminal` is true.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
@@ -811,6 +819,14 @@ Backoff formula:
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
+- Failure-driven retries stop after `agent.max_failure_retries` (default `3`). Non-retryable host,
+  workspace, and scope failures quarantine the issue immediately; capacity waits do not consume the
+  retry limit.
+- Quarantine is persisted per issue under the configured local workspace root, independently of
+  whether an issue workspace exists. Dispatch MUST skip persisted quarantines after restart.
+- Quarantined workspaces are retained and refuse reuse until an operator reconciles the workspace,
+  records a candidate, passes the review eligibility preflight, and clears the quarantine record
+  through the explicit quarantine-release operation.
 
 Retry handling behavior:
 
@@ -907,8 +923,9 @@ hooks (for example `after_create` and/or `before_run`).
 Failure handling:
 
 - Workspace population/synchronization failures return an error for the current attempt.
-- If failure happens while creating a brand-new workspace, implementations MAY remove the partially
-  prepared directory.
+- Implementations MUST preserve a failed workspace and its logs/workpad for diagnosis. A failed
+  `after_create` hook marks the workspace as requiring manual reconciliation and MUST NOT rerun the
+  hook automatically on the same workspace.
 - Reused workspaces SHOULD NOT be destructively reset on population failure unless that policy is
   explicitly chosen and documented.
 

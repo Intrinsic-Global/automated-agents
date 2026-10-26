@@ -18,6 +18,7 @@ polling:
   interval_ms: 15000
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  cleanup_on_terminal: false
 hooks:
   timeout_ms: 3600000
   after_create: |

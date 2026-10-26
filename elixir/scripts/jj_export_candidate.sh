@@ -48,8 +48,8 @@ if ! commit=$(jj --ignore-working-copy -R "$jj_workspace" log -r "$bookmark" --n
     printf 'jj export: candidate workspace is an isolated repo-local jj repo; the shared bookmark %s is invisible\n' "$bookmark" >&2
     exit 1
   fi
-  printf 'jj export: no %s bookmark; nothing to export\n' "$bookmark" >&2
-  exit 0
+  printf 'jj export: no %s bookmark; candidate is not ready for review\n' "$bookmark" >&2
+  exit 1
 fi
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
   printf 'jj export: invalid commit for %s: %s\n' "$bookmark" "$commit" >&2

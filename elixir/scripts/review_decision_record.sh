@@ -12,11 +12,6 @@ fi
 
 decision=${1:?usage: review_decision_record.sh <review-decision.json>}
 issue=$(basename "$PWD")
-state_dir=${SYMPHONY_STATE_DIR:-$SYMPHONY_WORKSPACES_ROOT/.symphony-state}
 eligibility_script=${SYMPHONY_ELIGIBILITY_SCRIPT:-$script_dir/symphony_eligibility.py}
 
-if [[ -f "$state_dir/issues/$issue.json" ]]; then
-  python3 "$eligibility_script" record-review --issue "$issue" --decision "$decision" >/dev/null
-else
-  printf 'review decision not recorded for %s: no eligibility state yet (legacy handoff)\n' "$issue" >&2
-fi
+python3 "$eligibility_script" record-review --issue "$issue" --decision "$decision" >/dev/null

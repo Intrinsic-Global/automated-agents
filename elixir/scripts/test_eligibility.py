@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import symphony_eligibility as elig
@@ -22,10 +23,10 @@ def run(argv, cwd=None):
 
 
 def jj(repo, *args):
-    return run(['jj', '--ignore-working-copy', '-R', str(repo), *args])
+    return run(['jj', '--ignore-working-copy', '-R', str(repo), *args], cwd=repo)
 
 def jj_mut(repo, *args):
-    return run(['jj', '-R', str(repo), *args])
+    return run(['jj', '-R', str(repo), *args], cwd=repo)
 
 
 def commit(repo, rev='@-'):
@@ -108,6 +109,16 @@ class EligibilityTest(unittest.TestCase):
             explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
         )
 
+    def publish_candidate(self, candidate):
+        producer_issue = self.producer / 'PRO-999'
+        producer_issue.mkdir(parents=True, exist_ok=True)
+        if not (producer_issue / '.git').is_dir():
+            run(['git', 'init', '-q', str(producer_issue)])
+        run([
+            'git', '-C', str(producer_issue), 'fetch', '--no-tags', str(self.repo),
+            f'+{candidate}:refs/heads/symphony/PRO-999',
+        ])
+
     def test_dispatch_without_dependencies_is_eligible(self):
         result = self.check('dispatch')
         self.assertEqual(result['status'], 'eligible', result)
@@ -174,6 +185,7 @@ class EligibilityTest(unittest.TestCase):
         self.record_workspace()
         candidate = self.base
         elig.record_candidate('PRO-999', candidate, self.base, explicit_config=str(self.config), explicit_state_dir=str(self.state_dir))
+        self.publish_candidate(candidate)
         decision_dir = self.reviewer / 'PRO-999'
         decision_dir.mkdir()
         decision = decision_dir / 'review-decision.json'
@@ -192,7 +204,9 @@ class EligibilityTest(unittest.TestCase):
         (self.repo / 'changed.txt').write_text('changed\n')
         run(['jj', 'commit', '-m', 'changed'], cwd=self.repo)
         changed = commit(self.repo)
+        run(['jj', 'edit', changed], cwd=self.workspace)
         elig.record_candidate('PRO-999', changed, self.base, explicit_config=str(self.config), explicit_state_dir=str(self.state_dir))
+        self.publish_candidate(changed)
         blocked = self.check('stage')
         self.assertEqual(blocked['status'], 'blocked', blocked)
         self.assertTrue(any('review_invalid' in x for x in blocked['reasons']), blocked)
@@ -213,6 +227,28 @@ class EligibilityTest(unittest.TestCase):
         result = self.check('stage')
         self.assertEqual(result['status'], 'blocked', result)
         self.assertTrue(any('review_invalid' in x for x in result['reasons']), result)
+
+    def test_review_without_a_pinned_candidate_is_blocked(self):
+        self.record_workspace()
+        result = self.check('review', self.issue([], 'In Review'))
+        self.assertEqual(result['status'], 'blocked', result)
+        self.assertIn('candidate_missing', result['reasons'])
+
+    def test_quarantine_clears_only_after_published_candidate_and_review_preflight(self):
+        self.record_workspace()
+        (self.workspace / '.symphony-quarantined').write_text('held\n', encoding='utf-8')
+        elig.record_candidate(
+            'PRO-999', self.base, self.base,
+            explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+        )
+        self.publish_candidate(self.base)
+        with patch.object(elig, 'linear_issue', return_value=self.issue([], 'In Review')):
+            result = elig.clear_quarantine(
+                'PRO-999', self.base,
+                explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            )
+        self.assertTrue(result['quarantine_cleared'])
+        self.assertFalse((self.workspace / '.symphony-quarantined').exists())
 
     def test_workspace_check_is_read_only(self):
         self.record_workspace()

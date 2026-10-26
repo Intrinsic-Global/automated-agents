@@ -16,6 +16,9 @@ unset LINEAR_ASSIGNEE
   echo "LINEAR_API_KEY is missing" >&2
   exit 1
 }
+command -v python3 >/dev/null || { echo "python3 is required for lane preflight" >&2; exit 1; }
+CODEX_BIN="${CODEX_BIN:-codex}"
+export CODEX_BIN
 
 CODE_ROOT="${CODE_ROOT:-$HOME/Code}"
 WORKTREE="${SYMPHONY_ELIXIR_ROOT:-$SCRIPT_DIR}"
@@ -123,6 +126,7 @@ fi
 [[ -d "$WORKTREE" ]] || { echo "Missing Symphony worktree: $WORKTREE" >&2; exit 1; }
 command -v bwrap >/dev/null || { echo "bubblewrap (bwrap) is required" >&2; exit 1; }
 command -v mise >/dev/null || { echo "mise is required" >&2; exit 1; }
+command -v flock >/dev/null || { echo "flock is required for exclusive lane ownership" >&2; exit 1; }
 
 usage() {
     echo "Usage: ./symphony [both|coding|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer]" >&2
@@ -139,6 +143,7 @@ esac
 run_role() {
     local selected_role="$1"
     local workflow_file workspace_root
+    local lane_lock_dir lane_lock_key lane_lock_fd
 
     case "$selected_role" in
         coding)
@@ -187,8 +192,25 @@ run_role() {
             ;;
     esac
 
+    SYMPHONY_WORKSPACE_ROOT="$workspace_root" python3 "$WORKTREE/scripts/symphony_preflight.py" \
+        --role "$selected_role" \
+        --workflow "$workflow_file" \
+        --code-root "$CODE_ROOT" \
+        --workspace-root "$workspace_root" \
+        --worktree "$WORKTREE"
+
+    lane_lock_dir="$RUNTIME_DIR/symphony-lane-locks"
+    mkdir -p "$lane_lock_dir"
+    lane_lock_key=$(basename "$workspace_root")
+    exec {lane_lock_fd}>"$lane_lock_dir/$lane_lock_key.lock"
+    if ! flock -n "$lane_lock_fd"; then
+        echo "Symphony lane already has a running owner: role=$selected_role workspace_root=$workspace_root" >&2
+        return 1
+    fi
+
     local -a process_args=(
         "${args[@]}"
+        --die-with-parent
         --setenv DISPLAY "${DISPLAY:-}"
         --setenv XDG_RUNTIME_DIR "$RUNTIME_DIR"
         --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=$RUNTIME_DIR/bus"

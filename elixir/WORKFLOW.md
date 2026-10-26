@@ -2,7 +2,11 @@
 tracker:
   kind: linear
   provider:
-    project_slug: "prf-research-ratification-and-sew-dispute-reference-0a4afbd7f0f1"
+    excluded_project_slugs:
+      - "pro-rata-production-readiness-af3912df6995"
+      - "protected-operations-base-sepolia-b90b18edae8f"
+      - "researcher-challenges-v0-dfe8a65db477"
+      - "deployment-bound-forensics-v0-ac0351862195"
     api_key: $LINEAR_API_KEY
   required_labels:
     - symphony-pilot
@@ -12,10 +16,12 @@ tracker:
 
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  cleanup_on_terminal: false
 
 agent:
   max_concurrent_agents: 1
   max_turns: 6
+  max_failure_retries: 3
 
 codex:
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server

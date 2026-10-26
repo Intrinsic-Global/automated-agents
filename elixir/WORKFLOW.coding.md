@@ -18,6 +18,7 @@ polling:
   interval_ms: 15000
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  cleanup_on_terminal: false
 hooks:
   after_create: |
     set -eu

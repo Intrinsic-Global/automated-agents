@@ -46,6 +46,17 @@ record_workspace_base() {
     --staging-base "$base" "$@" >/dev/null
 }
 
+assert_workspace_recorded() {
+  local state_file="${SYMPHONY_STATE_DIR:-$SYMPHONY_WORKSPACES_ROOT/.symphony-state}/issues/$issue.json"
+  [[ -f "$state_file" ]] || fail "existing JJ workspace has no provenance record; preserve it and reconcile explicitly: $workspace"
+  local recorded_workspace
+  recorded_workspace=$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(value.get("workspace") or "")' "$state_file") ||
+    fail "existing workspace provenance record is unreadable: $state_file"
+  [[ -n "$recorded_workspace" ]] || fail "existing JJ workspace is not pinned to an issue; preserve it and reconcile explicitly: $workspace"
+  [[ "$recorded_workspace" == "$workspace" ]] ||
+    fail "workspace provenance mismatch: recorded=$recorded_workspace actual=$workspace"
+}
+
 check_expected_source() {
   [[ -f "$workspace/deps.edn" ]] || fail "expected Clojure repository is missing deps.edn: $workspace"
 }
@@ -92,6 +103,7 @@ if [[ -e "$workspace" || -L "$workspace" ]]; then
     jj --ignore-working-copy -R "$workspace" root >/dev/null 2>&1 || fail "existing .jj data is not a usable jj workspace: $workspace"
     check_expected_source
     check_shared_repo
+    assert_workspace_recorded
     existing_base=$(jj --ignore-working-copy -R "$workspace" log -r '@-' --no-graph -T commit_id)
     record_workspace_base "$existing_base"
     eligibility_check resume

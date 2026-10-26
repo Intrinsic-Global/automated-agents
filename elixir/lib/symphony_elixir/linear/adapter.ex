@@ -17,8 +17,12 @@ defmodule SymphonyElixir.Linear.Adapter do
       not present_string?(tracker_settings.api_key) ->
         {:error, :missing_linear_api_token}
 
-      not present_string?(tracker_settings.project_slug) ->
+      not project_scope_configured?(tracker_settings) ->
         {:error, :missing_linear_project_slug}
+
+      is_list(tracker_settings.project_slugs) and tracker_settings.project_slugs != [] and
+        is_list(tracker_settings.excluded_project_slugs) and tracker_settings.excluded_project_slugs != [] ->
+        {:error, :conflicting_linear_project_scope}
 
       not is_nil(tracker_settings.assignee) and not present_string?(tracker_settings.assignee) ->
         {:error, :invalid_linear_assignee}
@@ -51,4 +55,16 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_value), do: false
+
+  defp project_scope_configured?(tracker_settings) do
+    present_string?(tracker_settings.project_slug) or
+      nonempty_string_list?(tracker_settings.project_slugs) or
+      nonempty_string_list?(tracker_settings.excluded_project_slugs)
+  end
+
+  defp nonempty_string_list?(values) when is_list(values) and values != [] do
+    Enum.all?(values, &present_string?/1)
+  end
+
+  defp nonempty_string_list?(_values), do: false
 end
