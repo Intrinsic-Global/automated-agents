@@ -88,8 +88,8 @@ The schema supports tracker selection, workspace paths, hooks, concurrency and r
 policy, logging, and optional server settings. See `../SPEC.md` and
 `lib/symphony_elixir/config/schema.ex` for the complete field definitions.
 
-For PRF lane launches, `./symphony` validates the selected workflow's project, state, routing labels,
-workspace mount, and host tools before launch. It holds a `flock` lock for the lane's workspace root
+For PRF lane launches, `./symphony` validates the selected workflow's project or exact issue scope,
+state, routing labels, workspace mount, and host tools before launch. It holds a `flock` lock for the lane's workspace root
 so a second systemd, tmux, or manual process cannot own the same lane. PRF workflows retain terminal
 workspaces; clear `.symphony-quarantined` only after reconciling the workspace and passing its
 eligibility preflight. Use `scripts/symphony_eligibility.py clear-quarantine --issue ISSUE
@@ -102,12 +102,20 @@ The default coding and reviewer workflows use `excluded_project_slugs`: they acc
 `symphony-pilot` issues from every Linear project except projects assigned to dedicated pro-rata,
 protected-operations, researcher-challenges, and forensic workflows. Those dedicated workflows
 remain restricted to their own project. Use either `project_slug`/`project_slugs` to allow specific
-projects or `excluded_project_slugs` to accept every project except the listed ones.
+projects or `excluded_project_slugs` to accept every project except the listed ones. Use
+`issue_identifiers` for a workflow bound to specific issue identifiers and
+`excluded_issue_identifiers` to keep those issues out of a broader poll.
+
+The local `coding-pro-106` role uses `WORKFLOW.pro-106.md` and a separate JJ workspace based on
+`prf-dev`'s current revision. Run it directly with `./symphony coding-pro-106`. It is intentionally
+excluded from the generic coding poll. This lane does not publish a candidate or update review
+state; its repository has no configured Symphony staging bookmark or candidate handoff yet.
 
 ## Tracker adapters
 
-- **Linear:** configure `provider.project_slugs` (or the legacy single `provider.project_slug`), or
-  `provider.excluded_project_slugs`, and `provider.api_key`; the key defaults to `LINEAR_API_KEY`.
+- **Linear:** configure `provider.project_slugs` (or the legacy single `provider.project_slug`),
+  `provider.excluded_project_slugs`, or exact `provider.issue_identifiers`, and `provider.api_key`;
+  the key defaults to `LINEAR_API_KEY`.
   Optional assignee routing uses `LINEAR_ASSIGNEE`.
 - **GitHub Issues:** configure `provider.repo` as `owner/repo`; token defaults to `GITHUB_TOKEN`.
   Set active and terminal states explicitly (`open` and `closed`). Pull requests are not dispatched.

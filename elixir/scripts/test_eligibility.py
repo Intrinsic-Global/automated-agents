@@ -123,6 +123,19 @@ class EligibilityTest(unittest.TestCase):
         result = self.check('dispatch')
         self.assertEqual(result['status'], 'eligible', result)
 
+    def test_workspace_only_repository_uses_pinned_base_and_rejects_review(self):
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        config['repos']['test']['workspace_only'] = True
+        config['repos']['test']['staging_bookmark'] = None
+        config['repos']['test']['base_revision'] = self.base
+        self.config.write_text(json.dumps(config), encoding='utf-8')
+
+        result = self.check('dispatch')
+        self.assertEqual(result['status'], 'eligible', result)
+        self.assertEqual(result['staging_tip'], self.base)
+        with self.assertRaisesRegex(RuntimeError, 'no configured staging/review handoff'):
+            self.check('review')
+
     def test_dependency_done_without_receipt_blocks(self):
         result = self.check('dispatch', self.issue([('PRO-880', 'Done')]))
         self.assertEqual(result['status'], 'blocked', result)

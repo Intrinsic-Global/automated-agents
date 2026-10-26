@@ -19,6 +19,7 @@ ROLE_WORKFLOWS = {
     'coding-pro-rata': 'WORKFLOW.coding.pro-rata.md',
     'coding-protected-ops': 'WORKFLOW.coding.protected-ops.md',
     'coding-researcher-challenges': 'WORKFLOW.coding.researcher-challenges.md',
+    'coding-pro-106': 'WORKFLOW.pro-106.md',
     'reviewer': 'WORKFLOW.reviewer.md',
     'reviewer-pro-rata': 'WORKFLOW.reviewer.pro-rata.md',
     'reviewer-protected-ops': 'WORKFLOW.reviewer.protected-ops.md',
@@ -87,7 +88,13 @@ def validate_config(role, config, expected_workspace_root=None):
     if not isinstance(excluded, list) or not all(isinstance(slug, str) for slug in excluded):
         fail('tracker.provider.excluded_project_slugs must be a list of strings')
     excluded = {slug.strip() for slug in excluded if slug.strip()}
-    if bool(slugs) == bool(excluded):
+    identifiers = provider.get('issue_identifiers') or []
+    excluded_identifiers = provider.get('excluded_issue_identifiers') or []
+    if not isinstance(identifiers, list) or not all(isinstance(value, str) for value in identifiers):
+        fail('tracker.provider.issue_identifiers must be a list of strings')
+    if not isinstance(excluded_identifiers, list) or not all(isinstance(value, str) for value in excluded_identifiers):
+        fail('tracker.provider.excluded_issue_identifiers must be a list of strings')
+    if bool(slugs) == bool(excluded) and not identifiers:
         fail('tracker.provider must define either project_slug/project_slugs or excluded_project_slugs')
 
     if role in ('coding', 'reviewer'):
@@ -97,6 +104,9 @@ def validate_config(role, config, expected_workspace_root=None):
         expected_project = DEDICATED_ROLE_PROJECTS[role]
         if slugs != {expected_project} or excluded:
             fail(f'{role} must be scoped only to its dedicated project: {expected_project}')
+    elif role == 'coding-pro-106':
+        if identifiers != ['PRO-106'] or slugs or excluded:
+            fail('coding-pro-106 must be scoped only to issue PRO-106')
 
     labels = tracker.get('required_labels') or []
     if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):

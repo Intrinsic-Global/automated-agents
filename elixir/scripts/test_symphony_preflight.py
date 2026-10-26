@@ -12,11 +12,20 @@ import symphony_preflight as preflight
 
 def workflow(role='coding', labels=None, states=None, projects=None):
     reviewer = role.startswith('reviewer')
+    if role in ('coding', 'reviewer'):
+        provider_scope = {
+            'excluded_project_slugs': sorted(preflight.DEDICATED_PROJECT_SLUGS),
+            'excluded_issue_identifiers': ['PRO-106'],
+        }
+    elif role == 'coding-pro-106':
+        provider_scope = {'issue_identifiers': ['PRO-106']}
+    else:
+        provider_scope = {'project_slugs': projects or ['automation']}
     return {
         'tracker': {
             'kind': 'linear',
             'provider': {
-                'project_slugs': projects or ['automation'],
+                **provider_scope,
                 'api_key': '$LINEAR_API_KEY',
             },
             'required_labels': labels or (
@@ -50,6 +59,18 @@ class SymphonyPreflightTest(unittest.TestCase):
     def test_coding_lane_rejects_review_only_state(self):
         with self.assertRaisesRegex(ValueError, 'active states'):
             preflight.validate_config('coding', workflow(states=['In Review']))
+
+    def test_pro_106_lane_is_pinned_to_one_issue(self):
+        config = preflight.load_workflow(Path(__file__).resolve().parent.parent / 'WORKFLOW.pro-106.md')
+        preflight.validate_config('coding-pro-106', config)
+
+        config['tracker']['provider']['issue_identifiers'] = ['PRO-106', 'PRO-107']
+        with self.assertRaisesRegex(ValueError, 'only to issue PRO-106'):
+            preflight.validate_config('coding-pro-106', config)
+
+    def test_default_coding_lane_excludes_pro_106(self):
+        config = preflight.load_workflow(Path(__file__).resolve().parent.parent / 'WORKFLOW.md')
+        self.assertIn('PRO-106', config['tracker']['provider']['excluded_issue_identifiers'])
 
     def test_project_scope_must_be_a_nonempty_list(self):
         config = workflow()

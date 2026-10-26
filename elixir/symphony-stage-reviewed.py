@@ -413,6 +413,8 @@ def process(decision_path, dry_run=False, manual_apply=False, local=False):
     if not re.fullmatch(r'[A-Z][A-Z0-9]*-[0-9]+', ISSUE):
         raise RuntimeError('Decision file is not in an issue workspace: '+ISSUE)
     repo_cfg = resolve_repo(ISSUE)
+    if repo_cfg.get('workspace_only'):
+        raise RuntimeError('Repository has no configured Symphony review/staging handoff: ' + str(repo_cfg.get('name')))
     BOOKMARK = repo_cfg.get('bookmark_prefix', 'symphony/') + ISSUE
     PRODUCER = Path(repo_cfg['producer_root']).expanduser() / ISSUE
     expected_prefix = (Path(repo_cfg['reviewer_root']).expanduser() / ISSUE).resolve()

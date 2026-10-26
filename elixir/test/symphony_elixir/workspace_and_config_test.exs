@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -1326,6 +1327,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert settings.tracker.project_slug == "legacy-project"
     assert settings.tracker.project_slugs == ["legacy-project", "first-project"]
+  end
+
+  test "schema normalizes exact Linear issue routing identifiers" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{
+                 kind: "linear",
+                 provider: %{api_key: "provider-token", issue_identifiers: [" pro-106 ", "PRO-106"]}
+               }
+             })
+
+    assert settings.tracker.issue_identifiers == ["PRO-106"]
+    assert Adapter.validate_config(settings.tracker) == :ok
   end
 
   test "linear adapter rejects invalid provider values without crashing config parsing" do

@@ -438,11 +438,16 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
     if not RE_ISSUE.fullmatch(issue):
         fail('invalid issue identifier: ' + str(issue))
     cfg = resolve_repo(issue, explicit_config)
+    if cfg.get('workspace_only') and phase in ('review', 'stage'):
+        fail(f"repository {cfg.get('name')} has no configured staging/review handoff")
     repo = Path(cfg['jj_repo']).expanduser()
     if not (repo / '.jj').exists():
         fail(f'JJ repository is missing: {repo}')
     if staging_tip is None:
-        staging_tip = jj_commit(repo, cfg['staging_bookmark'])
+        base_revision = cfg.get('staging_bookmark') or cfg.get('base_revision')
+        if not base_revision:
+            fail(f"repository {cfg.get('name')} has no staging bookmark or pinned base revision")
+        staging_tip = jj_commit(repo, base_revision)
     issue_data = linear_data or linear_issue(issue)
     state = load_state(issue, cfg, explicit_state_dir)
     if state.get('repo') != cfg.get('name'):
@@ -565,7 +570,10 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
 def record_workspace(issue, workspace, staging_base=None, fresh=False, explicit_config=None, explicit_state_dir=None):
     cfg = resolve_repo(issue, explicit_config)
     workspace = str(Path(workspace).resolve())
-    staging_base = staging_base or jj_commit(cfg['jj_repo'], cfg['staging_bookmark'])
+    base_revision = cfg.get('staging_bookmark') or cfg.get('base_revision')
+    if not base_revision:
+        fail(f"repository {cfg.get('name')} has no staging bookmark or pinned base revision")
+    staging_base = staging_base or jj_commit(cfg['jj_repo'], base_revision)
 
     def mutate(state):
         state['repo'] = cfg.get('name')

@@ -10,25 +10,10 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec validate_config(map()) :: :ok | {:error, term()}
   def validate_config(tracker_settings) do
-    cond do
-      not present_string?(tracker_settings.endpoint) ->
-        {:error, :invalid_linear_endpoint}
-
-      not present_string?(tracker_settings.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      not project_scope_configured?(tracker_settings) ->
-        {:error, :missing_linear_project_slug}
-
-      is_list(tracker_settings.project_slugs) and tracker_settings.project_slugs != [] and
-        is_list(tracker_settings.excluded_project_slugs) and tracker_settings.excluded_project_slugs != [] ->
-        {:error, :conflicting_linear_project_scope}
-
-      not is_nil(tracker_settings.assignee) and not present_string?(tracker_settings.assignee) ->
-        {:error, :invalid_linear_assignee}
-
-      true ->
-        :ok
+    with :ok <- validate_string(tracker_settings.endpoint, :invalid_linear_endpoint),
+         :ok <- validate_string(tracker_settings.api_key, :missing_linear_api_token),
+         :ok <- validate_project_scope(tracker_settings) do
+      validate_assignee(tracker_settings)
     end
   end
 
@@ -53,13 +38,45 @@ defmodule SymphonyElixir.Linear.Adapter do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
 
+  defp validate_string(value, error) do
+    if present_string?(value), do: :ok, else: {:error, error}
+  end
+
+  defp validate_project_scope(tracker_settings) do
+    cond do
+      project_scopes_conflict?(tracker_settings) ->
+        {:error, :conflicting_linear_project_scope}
+
+      project_scope_configured?(tracker_settings) ->
+        :ok
+
+      true ->
+        {:error, :missing_linear_project_slug}
+    end
+  end
+
+  defp project_scopes_conflict?(tracker_settings) do
+    is_list(tracker_settings.project_slugs) and tracker_settings.project_slugs != [] and
+      is_list(tracker_settings.excluded_project_slugs) and tracker_settings.excluded_project_slugs != []
+  end
+
+  defp validate_assignee(tracker_settings) do
+    if is_nil(tracker_settings.assignee) or present_string?(tracker_settings.assignee) do
+      :ok
+    else
+      {:error, :invalid_linear_assignee}
+    end
+  end
+
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_value), do: false
 
   defp project_scope_configured?(tracker_settings) do
     present_string?(tracker_settings.project_slug) or
       nonempty_string_list?(tracker_settings.project_slugs) or
-      nonempty_string_list?(tracker_settings.excluded_project_slugs)
+      nonempty_string_list?(tracker_settings.excluded_project_slugs) or
+      nonempty_string_list?(tracker_settings.issue_identifiers) or
+      nonempty_string_list?(tracker_settings.excluded_issue_identifiers)
   end
 
   defp nonempty_string_list?(values) when is_list(values) and values != [] do

@@ -129,14 +129,14 @@ command -v mise >/dev/null || { echo "mise is required" >&2; exit 1; }
 command -v flock >/dev/null || { echo "flock is required for exclusive lane ownership" >&2; exit 1; }
 
 usage() {
-    echo "Usage: ./symphony [both|coding|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer]" >&2
+    echo "Usage: ./symphony [both|coding|coding-pro-106|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer]" >&2
     exit 2
 }
 
 role="${1:-both}"
 [[ "$#" -le 1 ]] || usage
 case "$role" in
-    both|coding|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer) ;;
+    both|coding|coding-pro-106|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer) ;;
     *) usage ;;
 esac
 
@@ -161,6 +161,10 @@ run_role() {
         coding-researcher-challenges)
             workflow_file="$WORKTREE/WORKFLOW.coding.researcher-challenges.md"
             workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pilot-coding-researcher-challenges"
+            ;;
+        coding-pro-106)
+            workflow_file="$WORKTREE/WORKFLOW.pro-106.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-pro-106-coding"
             ;;
         reviewer)
             workflow_file="$WORKTREE/WORKFLOW.reviewer.md"
@@ -208,6 +212,13 @@ run_role() {
         return 1
     fi
 
+    local source_repo="${SYMPHONY_JJ_SOURCE_REPO:-}"
+    local source_revision="agent-c-staging"
+    if [[ "$selected_role" == coding-pro-106 ]]; then
+        source_repo="${PRF_DEV_JJ_REPO:-$CODE_ROOT/prf-dev}"
+        source_revision="@-"
+    fi
+
     local -a process_args=(
         "${args[@]}"
         --die-with-parent
@@ -217,7 +228,7 @@ run_role() {
         --setenv CODEX_HOME "$HOME/.codex"
         --setenv LINEAR_API_KEY "$LINEAR_API_KEY"
         --setenv SYMPHONY_ELIGIBILITY_ENFORCE 1
-        --setenv SYMPHONY_JJ_SOURCE_REPO "${SYMPHONY_JJ_SOURCE_REPO:-}"
+        --setenv SYMPHONY_JJ_SOURCE_REPO "$source_repo"
         --setenv SYMPHONY_JJ_REPO "${SYMPHONY_JJ_REPO:-}"
         --setenv SYMPHONY_ALLOWED_PATHS "${SYMPHONY_ALLOWED_PATHS:-}"
         --setenv SYMPHONY_BB "$HOME/bin/bb"
@@ -234,7 +245,7 @@ run_role() {
         --setenv SEW_SIMULATION_JJ_ROOT "${SEW_SIMULATION_JJ_ROOT:-}"
         --setenv SEW_SIMULATION_GIT_ROOT "${SEW_SIMULATION_GIT_ROOT:-}"
         --setenv PATH "$HOME/.symphony-tools:$PATH"
-        --setenv SYMPHONY_JJ_SOURCE_REVISION agent-c-staging
+        --setenv SYMPHONY_JJ_SOURCE_REVISION "$source_revision"
         --setenv SYMPHONY_WORKSPACE_ROOT "$workspace_root"
         --setenv SYMPHONY_JJ_WORKSPACE_ROOT "$workspace_root"
         --setenv XDG_CURRENT_DESKTOP "${XDG_CURRENT_DESKTOP:-}"

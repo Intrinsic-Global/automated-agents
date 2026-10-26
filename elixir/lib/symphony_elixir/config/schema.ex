@@ -54,6 +54,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:project_slug, :string)
       field(:project_slugs, {:array, :string}, default: [])
       field(:excluded_project_slugs, {:array, :string}, default: [])
+      field(:issue_identifiers, {:array, :string}, default: [])
+      field(:excluded_issue_identifiers, {:array, :string}, default: [])
       field(:assignee, :string)
       field(:provider, :map, default: %{})
       field(:secret_environment_names, {:array, :string}, default: [])
@@ -74,6 +76,8 @@ defmodule SymphonyElixir.Config.Schema do
           :project_slug,
           :project_slugs,
           :excluded_project_slugs,
+          :issue_identifiers,
+          :excluded_issue_identifiers,
           :assignee,
           :provider,
           :required_labels,
@@ -458,6 +462,9 @@ defmodule SymphonyElixir.Config.Schema do
     excluded_project_slugs =
       normalized_project_slug_list(provider, "excluded_project_slugs", settings.tracker.excluded_project_slugs)
 
+    issue_identifiers = normalized_issue_identifiers(provider, "issue_identifiers")
+    excluded_issue_identifiers = normalized_issue_identifiers(provider, "excluded_issue_identifiers")
+
     tracker = %{
       settings.tracker
       | endpoint: Map.get(provider, "endpoint", settings.tracker.endpoint),
@@ -465,6 +472,8 @@ defmodule SymphonyElixir.Config.Schema do
         project_slug: List.first(project_slugs),
         project_slugs: project_slugs,
         excluded_project_slugs: excluded_project_slugs,
+        issue_identifiers: issue_identifiers,
+        excluded_issue_identifiers: excluded_issue_identifiers,
         assignee: assignee,
         provider: provider,
         secret_environment_names: Enum.uniq(secret_environment_names),
@@ -500,6 +509,16 @@ defmodule SymphonyElixir.Config.Schema do
     |> List.wrap()
     |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
     |> Enum.map(&String.trim/1)
+    |> Enum.uniq()
+  end
+
+  defp normalized_issue_identifiers(provider, key) do
+    provider
+    |> Map.get(key, [])
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&(String.trim(&1) |> String.upcase()))
+    |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()
   end
 

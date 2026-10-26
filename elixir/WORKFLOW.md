@@ -7,6 +7,8 @@ tracker:
       - "protected-operations-base-sepolia-b90b18edae8f"
       - "researcher-challenges-v0-dfe8a65db477"
       - "deployment-bound-forensics-v0-ac0351862195"
+    excluded_issue_identifiers:
+      - PRO-106
     api_key: $LINEAR_API_KEY
   required_labels:
     - symphony-pilot

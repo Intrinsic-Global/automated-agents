@@ -124,7 +124,12 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(get_in(tracker, ["provider", "project_slug"]))
+    provider = Map.get(tracker, "provider", %{})
+
+    assert is_binary(Map.get(provider, "project_slug")) or
+             is_list(Map.get(provider, "excluded_project_slugs")) or
+             is_list(Map.get(provider, "issue_identifiers"))
+
     assert is_list(Map.get(tracker, "active_states"))
     assert Map.get(tracker, "required_labels") == ["symphony-pilot"]
     refute Map.has_key?(tracker, "terminal_states")
@@ -1438,6 +1443,27 @@ defmodule SymphonyElixir.CoreTest do
 
   test "fetch issues by states with empty state set is a no-op" do
     assert {:ok, []} = Client.fetch_issues_by_states([])
+  end
+
+  test "linear poll scope can target one issue without requiring a project" do
+    {query, variables} = Client.scoped_poll_query_for_test(%{issue_identifiers: ["PRO-106"]})
+
+    assert query =~ "identifier: {in: $issueIdentifiers"
+    refute query =~ "project: {slugId:"
+    refute query =~ "$projectSlugs"
+    assert variables == %{issueIdentifiers: ["PRO-106"]}
+  end
+
+  test "linear poll scope can exclude a routed issue from a broad project poll" do
+    {query, variables} =
+      Client.scoped_poll_query_for_test(%{
+        excluded_project_slugs: ["dedicated"],
+        excluded_issue_identifiers: ["PRO-106"]
+      })
+
+    assert query =~ "slugId: {nin: $projectSlugs}"
+    assert query =~ "nin: $excludedIssueIdentifiers"
+    assert variables == %{projectSlugs: ["dedicated"], excludedIssueIdentifiers: ["PRO-106"]}
   end
 
   test "prompt builder renders issue and attempt values from workflow template" do

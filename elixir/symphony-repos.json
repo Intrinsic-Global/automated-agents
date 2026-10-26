@@ -152,6 +152,28 @@
         ]
       ],
       "issues": {}
+    },
+    "prf-dev": {
+      "remote": "https://github.com/protocol-robustness/prf-dev.git",
+      "jj_repo": "$PRF_DEV_JJ_REPO",
+      "producer_root": "$SYMPHONY_WORKSPACES_ROOT/prf-dev-coder",
+      "reviewer_root": "$SYMPHONY_WORKSPACES_ROOT/prf-dev-reviewer",
+      "staging_bookmark": null,
+      "base_revision": "@-",
+      "workspace_only": true,
+      "bookmark_prefix": "symphony/",
+      "workspace_prefix": "symphony-prf-dev",
+      "validation": [],
+      "issues": {
+        "PRO-106": [
+          "docs/",
+          "policies/",
+          "schemas/",
+          "src/prf_dev/",
+          "tests/",
+          "pyproject.toml"
+        ]
+      }
     }
   },
   "issue_repos": {
@@ -160,6 +182,7 @@
     "PRO-88": "prf",
     "PRO-89": "prf",
     "PRO-46": "prf-evm",
-    "PRO-20": "prf-site"
+    "PRO-20": "prf-site",
+    "PRO-106": "prf-dev"
   }
 }
