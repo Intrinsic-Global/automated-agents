@@ -166,6 +166,35 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     refute backoff_line =~ "\\n"
   end
 
+  test "running agent displays recent warning log tail" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [
+           running_entry(%{
+             identifier: "PRO-108",
+             recent_codex_logs: [
+               %{
+                 at: ~U[2026-10-25 22:40:21Z],
+                 message: "ERROR codex_models_manager failed to refresh available models: request timed out"
+               },
+               %{
+                 at: ~U[2026-10-25 22:40:36Z],
+                 message: "ERROR codex_models_manager failed to refresh available models: request timed out"
+               }
+             ]
+           })
+         ],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+    assert rendered =~ "Recent agent log output"
+    assert length(Regex.scan(~r/codex_models_manager failed to refresh available models/, rendered)) == 2
+  end
+
   test "snapshot fixture: unlimited credits variant" do
     snapshot_data =
       {:ok,

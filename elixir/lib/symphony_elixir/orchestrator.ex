@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, Eligibility, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Linear.Client, as: LinearClient
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -250,13 +251,19 @@ defmodule SymphonyElixir.Orchestrator do
 
     next_attempt = next_retry_attempt_from_running(running_entry)
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      issue_url: running_entry.issue.url,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+    retry_failure(
+      state,
+      issue_id,
+      next_attempt,
+      %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        error: "agent exited: #{inspect(reason)}",
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      },
+      running_entry
+    )
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -634,11 +641,16 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
         |> terminate_running_issue(issue_id, false)
-        |> schedule_issue_retry(issue_id, next_attempt, %{
-          identifier: identifier,
-          issue_url: running_entry.issue.url,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
-        })
+        |> retry_failure(
+          issue_id,
+          next_attempt,
+          %{
+            identifier: identifier,
+            issue_url: running_entry.issue.url,
+            error: "stalled for #{elapsed_ms}ms without codex activity"
+          },
+          running_entry
+        )
       end
     else
       state
@@ -787,6 +799,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+    quarantine_target = Map.get(running_entry, :issue) || Map.get(running_entry, :identifier) || issue_id
+    worker_host = Map.get(running_entry, :worker_host)
+
+    case Workspace.quarantine_issue(quarantine_target, error, worker_host) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to persist issue quarantine issue_id=#{issue_id}: #{inspect(reason)}")
+    end
+
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
@@ -880,6 +900,7 @@ defmodule SymphonyElixir.Orchestrator do
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
+      !Workspace.quarantined_issue?(issue) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
@@ -1026,6 +1047,7 @@ defmodule SymphonyElixir.Orchestrator do
             workspace_path: nil,
             session_id: nil,
             last_codex_message: nil,
+            recent_codex_logs: [],
             last_codex_timestamp: nil,
             last_codex_event: nil,
             codex_app_server_pid: nil,
@@ -1051,12 +1073,18 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
-        schedule_issue_retry(state, issue.id, next_attempt, %{
-          identifier: issue.identifier,
-          issue_url: issue.url,
-          error: "failed to spawn agent: #{inspect(reason)}",
-          worker_host: worker_host
-        })
+        retry_failure(
+          state,
+          issue.id,
+          next_attempt,
+          %{
+            identifier: issue.identifier,
+            issue_url: issue.url,
+            error: "failed to spawn agent: #{inspect(reason)}",
+            worker_host: worker_host
+          },
+          %{issue: issue, identifier: issue.identifier, worker_host: worker_host}
+        )
     end
   end
 
@@ -1086,6 +1114,74 @@ defmodule SymphonyElixir.Orchestrator do
       | completed: MapSet.put(state.completed, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
+  end
+
+  defp retry_failure(%State{} = state, issue_id, attempt, metadata, issue_entry)
+       when is_binary(issue_id) and is_map(metadata) and is_map(issue_entry) do
+    retry_number = if is_integer(attempt) and attempt > 0, do: attempt, else: 1
+    max_retries = Config.settings!().agent.max_failure_retries
+    error = metadata[:error] || "agent attempt failed"
+
+    cond do
+      non_retryable_failure?(error) ->
+        quarantine_failure(state, issue_id, issue_entry, "non-retryable host failure: #{error}")
+
+      retry_number > max_retries ->
+        quarantine_failure(
+          state,
+          issue_id,
+          issue_entry,
+          "failure retry limit reached after #{max_retries} retries; last error: #{error}"
+        )
+
+      true ->
+        schedule_issue_retry(state, issue_id, retry_number, metadata)
+    end
+  end
+
+  defp quarantine_failure(%State{} = state, issue_id, issue_entry, error) do
+    Logger.error("Quarantining issue_id=#{issue_id} issue_identifier=#{Map.get(issue_entry, :identifier, issue_id)}: #{error}")
+
+    case Map.get(issue_entry, :issue) do
+      %Issue{id: linear_issue_id, identifier: identifier} when is_binary(linear_issue_id) ->
+        comment = "Symphony quarantined this issue and stopped automatic retries.\n\nReason: #{error}\n\nRe-entry requires reconciling the existing workspace/candidate and passing the lane preflight."
+
+        case LinearClient.add_comment(linear_issue_id, comment) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("Failed to write quarantine workpad comment issue_identifier=#{identifier}: #{inspect(reason)}")
+        end
+
+      _ ->
+        :ok
+    end
+
+    block_issue_from_entry(state, issue_id, issue_entry, error)
+  end
+
+  defp non_retryable_failure?(reason) do
+    normalized = String.downcase(inspect(reason))
+
+    Enum.any?(
+      [
+        "workspace_hook_failed",
+        "workspace_hook_timeout",
+        "workspace_prepare_failed",
+        "workspace_path_conflict",
+        "workspace_bootstrap_incomplete",
+        "workspace_unsafe",
+        "workspace_base_diverged",
+        "workspace_base_is_stale",
+        "read-only file system",
+        "permission denied",
+        "enoent",
+        "missing_workflow_file",
+        "invalid_workflow_config",
+        "missing_linear_project_slug",
+        "outside_root",
+        "symlink_escape"
+      ],
+      &String.contains?(normalized, &1)
+    )
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
@@ -1161,11 +1257,12 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
         {:noreply,
-         schedule_issue_retry(
+         retry_failure(
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"}),
+           %{identifier: metadata[:identifier] || issue_id}
          )}
     end
   end
@@ -1202,26 +1299,57 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
 
   defp cleanup_issue_workspace(issue_or_identifier, metadata) when is_map(metadata) do
-    case Map.get(metadata, :workspace_path) do
-      workspace_path when is_binary(workspace_path) and workspace_path != "" ->
-        Workspace.remove_recorded(workspace_path, Map.get(metadata, :worker_host))
+    if Config.settings!().workspace.cleanup_on_terminal do
+      case Map.get(metadata, :workspace_path) do
+        workspace_path when is_binary(workspace_path) and workspace_path != "" ->
+          Workspace.remove_recorded(workspace_path, Map.get(metadata, :worker_host))
 
-      _ ->
-        cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
+        _ ->
+          cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
+      end
+    else
+      log_retained_terminal_workspace(issue_or_identifier, metadata)
     end
   end
 
   defp cleanup_issue_workspace(%Issue{} = issue, worker_host) do
-    Workspace.remove_issue_workspaces(issue, worker_host)
+    if Config.settings!().workspace.cleanup_on_terminal do
+      Workspace.remove_issue_workspaces(issue, worker_host)
+    else
+      log_retained_terminal_workspace(issue, %{worker_host: worker_host})
+    end
   end
 
   defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier, worker_host)
+    if Config.settings!().workspace.cleanup_on_terminal do
+      Workspace.remove_issue_workspaces(identifier, worker_host)
+    else
+      log_retained_terminal_workspace(identifier, %{worker_host: worker_host})
+    end
   end
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
+  defp log_retained_terminal_workspace(issue_or_identifier, metadata) do
+    context =
+      case issue_or_identifier do
+        %Issue{} = issue -> issue_context(issue)
+        identifier -> "issue_identifier=#{identifier}"
+      end
+
+    Logger.info("Retaining terminal workspace for #{context} worker_host=#{worker_host_for_log(metadata[:worker_host])}; workspace.cleanup_on_terminal=false")
+    :ok
+  end
+
   defp run_terminal_workspace_cleanup do
+    if Config.settings!().workspace.cleanup_on_terminal do
+      do_run_terminal_workspace_cleanup()
+    else
+      Logger.info("Skipping startup terminal workspace cleanup because workspace.cleanup_on_terminal=false")
+    end
+  end
+
+  defp do_run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
       {:ok, issues} ->
         issues
@@ -1258,14 +1386,15 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:error, reason} ->
           {:noreply,
-           schedule_issue_retry(
+           retry_failure(
              state,
              issue.id,
              attempt + 1,
              Map.merge(metadata, %{
                identifier: issue.identifier,
                error: "retry dispatch refresh failed: #{inspect(reason)}"
-             })
+             }),
+             %{issue: issue, identifier: issue.identifier, workspace_path: metadata[:workspace_path]}
            )}
       end
     else
@@ -1275,7 +1404,7 @@ defmodule SymphonyElixir.Orchestrator do
        schedule_issue_retry(
          state,
          issue.id,
-         attempt + 1,
+         attempt,
          Map.merge(metadata, %{
            identifier: issue.identifier,
            error: "no available orchestrator slots"
@@ -1440,6 +1569,9 @@ defmodule SymphonyElixir.Orchestrator do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  defp worker_host_for_log(nil), do: "local"
+  defp worker_host_for_log(worker_host), do: worker_host
+
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
@@ -1505,6 +1637,7 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          recent_codex_logs: Map.get(metadata, :recent_codex_logs, []),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)
@@ -1594,6 +1727,7 @@ defmodule SymphonyElixir.Orchestrator do
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
+        recent_codex_logs: append_recent_codex_log(Map.get(running_entry, :recent_codex_logs, []), update),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
@@ -1652,6 +1786,14 @@ defmodule SymphonyElixir.Orchestrator do
       timestamp: update[:timestamp]
     }
   end
+
+  defp append_recent_codex_log(logs, %{event: :stream_log, message: message, timestamp: timestamp})
+       when is_binary(message) do
+    entry = %{at: timestamp, message: String.slice(message, 0, 500)}
+    (logs ++ [entry]) |> Enum.take(-8)
+  end
+
+  defp append_recent_codex_log(logs, _update), do: logs
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
     if is_reference(state.tick_timer_ref) do

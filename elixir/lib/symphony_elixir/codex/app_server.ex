@@ -21,7 +21,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil,
-          dynamic_tool_binding: map()
+          dynamic_tool_binding: map(),
+          on_message: (map() -> term())
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -38,6 +39,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    on_message = Keyword.get(opts, :on_message, &default_on_message/1)
     dynamic_tool_binding = DynamicTool.bind()
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
@@ -46,7 +48,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, thread_id} <-
-             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding) do
+             do_start_session(
+               port,
+               expanded_workspace,
+               session_policies,
+               dynamic_tool_binding,
+               on_message,
+               metadata
+             ) do
         {:ok,
          %{
            port: port,
@@ -58,7 +67,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_id: thread_id,
            workspace: expanded_workspace,
            worker_host: worker_host,
-           dynamic_tool_binding: dynamic_tool_binding
+           dynamic_tool_binding: dynamic_tool_binding,
+           on_message: on_message
          }}
       else
         {:error, reason} ->
@@ -78,20 +88,31 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace,
-          dynamic_tool_binding: dynamic_tool_binding
+          dynamic_tool_binding: dynamic_tool_binding,
+          on_message: session_on_message
         },
         prompt,
         issue,
         opts \\ []
       ) do
-    on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    on_message = Keyword.get(opts, :on_message, session_on_message)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(
+           port,
+           thread_id,
+           prompt,
+           issue,
+           workspace,
+           approval_policy,
+           turn_sandbox_policy,
+           on_message,
+           metadata
+         ) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -272,7 +293,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp send_initialize(port) do
+  defp send_initialize(port, on_message, metadata) do
     payload = %{
       "method" => "initialize",
       "id" => @initialize_id,
@@ -290,7 +311,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     send_message(port, payload)
 
-    with {:ok, _} <- await_response(port, @initialize_id) do
+    with {:ok, _} <- await_response(port, @initialize_id, on_message, metadata) do
       send_message(port, %{"method" => "initialized", "params" => %{}})
       :ok
     end
@@ -304,9 +325,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding)
+  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding, on_message, metadata) do
+    case send_initialize(port, on_message, metadata) do
+      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding, on_message, metadata)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -315,7 +336,9 @@ defmodule SymphonyElixir.Codex.AppServer do
          port,
          workspace,
          %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
-         dynamic_tool_binding
+         dynamic_tool_binding,
+         on_message,
+         metadata
        ) do
     send_message(port, %{
       "method" => "thread/start",
@@ -328,7 +351,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     })
 
-    case await_response(port, @thread_start_id) do
+    case await_response(port, @thread_start_id, on_message, metadata) do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
           %{"id" => thread_id} -> {:ok, thread_id}
@@ -340,7 +363,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+  defp start_turn(
+         port,
+         thread_id,
+         prompt,
+         issue,
+         workspace,
+         approval_policy,
+         turn_sandbox_policy,
+         on_message,
+         metadata
+       ) do
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,
@@ -359,7 +392,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     })
 
-    case await_response(port, @turn_start_id) do
+    case await_response(port, @turn_start_id, on_message, metadata) do
       {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
       other -> other
     end
@@ -475,7 +508,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
 
       {:error, _reason} ->
-        log_non_json_stream_line(payload_string, "turn stream")
+        log_non_json_stream_line(
+          payload_string,
+          "turn stream",
+          stream_log_handler(on_message, "turn", metadata_from_message(port, %{}))
+        )
 
         if protocol_message_candidate?(payload_string) do
           emit_message(
@@ -908,18 +945,32 @@ defmodule SymphonyElixir.Codex.AppServer do
     String.starts_with?(normalized_label, "approve") or String.starts_with?(normalized_label, "allow")
   end
 
-  defp await_response(port, request_id) do
-    with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
+  defp await_response(port, request_id, on_message, metadata) do
+    with_timeout_response(
+      port,
+      request_id,
+      Config.settings!().codex.read_timeout_ms,
+      "",
+      on_message,
+      metadata
+    )
   end
 
-  defp with_timeout_response(port, request_id, timeout_ms, pending_line) do
+  defp with_timeout_response(port, request_id, timeout_ms, pending_line, on_message, metadata) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_response(port, request_id, complete_line, timeout_ms)
+        handle_response(port, request_id, complete_line, timeout_ms, on_message, metadata)
 
       {^port, {:data, {:noeol, chunk}}} ->
-        with_timeout_response(port, request_id, timeout_ms, pending_line <> to_string(chunk))
+        with_timeout_response(
+          port,
+          request_id,
+          timeout_ms,
+          pending_line <> to_string(chunk),
+          on_message,
+          metadata
+        )
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
@@ -929,7 +980,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_response(port, request_id, data, timeout_ms) do
+  defp handle_response(port, request_id, data, timeout_ms, on_message, metadata) do
     payload = to_string(data)
 
     case Jason.decode(payload) do
@@ -944,15 +995,26 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{} = other} ->
         Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
-        with_timeout_response(port, request_id, timeout_ms, "")
+        with_timeout_response(port, request_id, timeout_ms, "", on_message, metadata)
 
       {:error, _} ->
-        log_non_json_stream_line(payload, "response stream")
-        with_timeout_response(port, request_id, timeout_ms, "")
+        log_non_json_stream_line(
+          payload,
+          "response stream",
+          stream_log_handler(on_message, "response", metadata)
+        )
+
+        with_timeout_response(port, request_id, timeout_ms, "", on_message, metadata)
     end
   end
 
-  defp log_non_json_stream_line(data, stream_label) do
+  defp stream_log_handler(on_message, stream, metadata) do
+    fn text ->
+      emit_message(on_message, :stream_log, %{message: text, stream: stream}, metadata)
+    end
+  end
+
+  defp log_non_json_stream_line(data, stream_label, on_log) do
     text =
       data
       |> to_string()
@@ -961,6 +1023,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     if text != "" do
       if String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) do
+        on_log.(text)
         Logger.warning("Codex #{stream_label} output: #{text}")
       else
         Logger.debug("Codex #{stream_label} output: #{text}")

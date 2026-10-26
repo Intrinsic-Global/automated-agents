@@ -100,6 +100,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              message: %{method: "some-event"},
              timestamp: now
            }
+
+    warning = "ERROR codex_models_manager failed to refresh available models: request timed out"
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id, %{event: :stream_log, message: warning, timestamp: now}}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert [recent_log] = hd(snapshot.running).recent_codex_logs
+    assert recent_log.message == warning
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do

@@ -57,6 +57,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert String.starts_with?(Path.basename(first_workspace), "MT_Det--")
   end
 
+  test "issue quarantine persists and blocks dispatch when no workspace exists" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-quarantine-#{System.unique_integer([:positive])}"
+      )
+
+    issue_identifier = "MT-NO-WORKSPACE"
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert :ok = Workspace.quarantine_issue(issue_identifier, "spawn retries exhausted", nil)
+
+    quarantine_record = Path.join([workspace_root, ".symphony-quarantine", issue_identifier])
+    expected_workspace = Path.join(workspace_root, issue_identifier)
+
+    assert File.regular?(quarantine_record)
+    assert Workspace.quarantined_issue?(issue_identifier)
+    refute File.exists?(expected_workspace)
+
+    assert {:error, {:workspace_quarantined, ^issue_identifier}} =
+             Workspace.create_for_issue(issue_identifier)
+  end
+
+  test "orchestrator skips a persisted issue quarantine before spawning after restart" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-restart-quarantine-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "quarantined-issue-id",
+      identifier: "MT-QUARANTINED-RESTART",
+      title: "Previously quarantined issue",
+      state: "Todo",
+      labels: ["symphony-pilot"],
+      dispatchable: true
+    }
+
+    assert :ok = Workspace.quarantine_issue(issue.identifier, "spawn retry limit reached", nil)
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{}
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "relative local workspace roots resolve from the workflow directory" do
     workflow_dir = Path.dirname(Workflow.workflow_file_path())
     launcher_dir = Path.join(System.tmp_dir!(), "symphony-elixir-launcher-#{System.unique_integer([:positive])}")
@@ -145,7 +200,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "workspace replaces stale non-directory paths" do
+  test "workspace preserves stale non-directory paths" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -159,10 +214,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-      assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(stale_workspace)
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-STALE")
-      assert workspace == canonical_workspace
-      assert File.dir?(workspace)
+      assert {:error, {:workspace_path_conflict, stale_workspace, :not_a_directory}} =
+               Workspace.create_for_issue("MT-STALE")
+
+      assert File.read!(stale_workspace) == "old state\n"
     after
       File.rm_rf(workspace_root)
     end
@@ -300,7 +355,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "workspace retries after_create after a failed new workspace bootstrap" do
+  test "workspace preserves failed after_create state and does not repeat the hook" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -324,9 +379,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
                Workspace.create_for_issue("MT-FAIL-RETRY")
 
-      assert {:ok, workspace} = Workspace.create_for_issue("MT-FAIL-RETRY")
-      assert File.read!(Path.join(workspace, "READY")) == "ready"
-      assert String.split(String.trim(File.read!(attempt_log)), "\n") == ["attempt", "attempt"]
+      assert {:error, {:workspace_bootstrap_incomplete, workspace}} =
+               Workspace.create_for_issue("MT-FAIL-RETRY")
+
+      assert File.read!(Path.join(workspace, "partial.txt")) == "partial"
+      assert File.exists?(Path.join(workspace, ".symphony-bootstrap-failed"))
+      assert String.split(String.trim(File.read!(attempt_log)), "\n") == ["attempt"]
     after
       File.rm_rf(test_root)
     end
@@ -593,19 +651,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_receive {:fetch_issue_states_page, query,
                     %{
                       ids: ^first_batch_ids,
-                      projectSlug: "test-project",
+                      projectSlugs: ["test-project"],
                       first: 50,
                       relationFirst: 50
                     }}
 
     assert query =~ "SymphonyLinearIssuesById"
-    assert query =~ "projectSlug"
+    assert query =~ "projectSlugs"
     assert query =~ "slugId"
 
     assert_receive {:fetch_issue_states_page, ^query,
                     %{
                       ids: ^second_batch_ids,
-                      projectSlug: "test-project",
+                      projectSlugs: ["test-project"],
                       first: 5,
                       relationFirst: 50
                     }}
@@ -677,6 +735,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              )
 
     assert_receive {:bound_graphql_request, %{"query" => "query Viewer { viewer { id } }"}, [{"Authorization", "bound-token"}, {"Content-Type", "application/json"}]}
+  end
+
+  test "linear client writes quarantine comments and reports rejected mutations" do
+    tracker_settings = %{
+      api_key: "test-token",
+      endpoint: "https://linear.example.test/graphql"
+    }
+
+    success_request = fn payload, _headers ->
+      assert payload["query"] =~ "commentCreate"
+      assert payload["variables"] == %{issueId: "issue-1", body: "quarantined"}
+      {:ok, %{status: 200, body: %{"data" => %{"commentCreate" => %{"success" => true}}}}}
+    end
+
+    assert :ok = Client.add_comment("issue-1", "quarantined", tracker_settings: tracker_settings, request_fun: success_request)
+
+    rejected_request = fn _payload, _headers ->
+      {:ok, %{status: 200, body: %{"data" => %{"commentCreate" => %{"success" => false}}}}}
+    end
+
+    assert {:error, {:linear_comment_rejected, _response}} =
+             Client.add_comment("issue-1", "quarantined", tracker_settings: tracker_settings, request_fun: rejected_request)
+
+    request_error = fn _payload, _headers -> {:error, :timeout} end
+
+    assert {:error, {:linear_api_request, :timeout}} =
+             Client.add_comment("issue-1", "quarantined", tracker_settings: tracker_settings, request_fun: request_error)
   end
 
   test "orchestrator sorts dispatch by priority then oldest created_at" do
@@ -1226,6 +1311,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
+  test "schema normalizes plural Linear project scopes and the legacy alias" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{
+                 kind: "linear",
+                 provider: %{
+                   api_key: "provider-token",
+                   project_slug: " legacy-project ",
+                   project_slugs: ["first-project", " legacy-project ", "first-project", " "]
+                 }
+               }
+             })
+
+    assert settings.tracker.project_slug == "legacy-project"
+    assert settings.tracker.project_slugs == ["legacy-project", "first-project"]
+  end
+
   test "linear adapter rejects invalid provider values without crashing config parsing" do
     assert {:ok, invalid_secret_settings} =
              Schema.parse(%{
@@ -1449,6 +1551,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
+
+    policy_env = "SYMP_POLICY_VALUE_#{System.unique_integer([:positive])}"
+    missing_policy_env = "SYMP_POLICY_MISSING_#{System.unique_integer([:positive])}"
+    previous_policy_env = System.get_env(policy_env)
+    previous_missing_policy_env = System.get_env(missing_policy_env)
+    System.put_env(policy_env, "/tmp/policy-value")
+    System.delete_env(missing_policy_env)
+
+    on_exit(fn ->
+      restore_env(policy_env, previous_policy_env)
+      restore_env(missing_policy_env, previous_missing_policy_env)
+    end)
+
+    assert {:ok, runtime_policy} =
+             Schema.resolve_runtime_turn_sandbox_policy(
+               %Schema{
+                 codex: %Codex{
+                   turn_sandbox_policy: %{
+                     "type" => "workspaceWrite",
+                     "writableRoots" => ["$#{policy_env}", "$#{missing_policy_env}", "$invalid token"]
+                   }
+                 }
+               },
+               "/tmp/workspace"
+             )
+
+    assert runtime_policy["writableRoots"] == [
+             "/tmp/policy-value",
+             "$#{missing_policy_env}",
+             "$invalid token"
+           ]
   end
 
   test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do

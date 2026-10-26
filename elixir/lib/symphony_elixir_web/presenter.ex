@@ -80,7 +80,10 @@ defmodule SymphonyElixirWeb.Presenter do
       retry: retry && retry_issue_payload(retry),
       blocked: blocked && blocked_issue_payload(blocked),
       logs: %{
-        codex_session_logs: []
+        codex_session_logs:
+          running
+          |> then(&if(&1, do: Map.get(&1, :recent_codex_logs, []), else: []))
+          |> Enum.map(&log_entry_payload/1)
       },
       recent_events: recent_events_payload(running || blocked),
       last_error: (blocked && blocked.error) || (retry && retry.error),
@@ -113,6 +116,7 @@ defmodule SymphonyElixirWeb.Presenter do
       last_message: summarize_message(entry.last_codex_message),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_codex_timestamp),
+      recent_logs: Enum.map(Map.get(entry, :recent_codex_logs, []), &log_entry_payload/1),
       tokens: %{
         input_tokens: entry.codex_input_tokens,
         output_tokens: entry.codex_output_tokens,
@@ -162,6 +166,7 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event: running.last_codex_event,
       last_message: summarize_message(running.last_codex_message),
       last_event_at: iso8601(running.last_codex_timestamp),
+      recent_logs: Enum.map(Map.get(running, :recent_codex_logs, []), &log_entry_payload/1),
       tokens: %{
         input_tokens: running.codex_input_tokens,
         output_tokens: running.codex_output_tokens,
@@ -222,6 +227,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+
+  defp log_entry_payload(%{at: at, message: message}),
+    do: %{at: iso8601(at), message: message}
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()

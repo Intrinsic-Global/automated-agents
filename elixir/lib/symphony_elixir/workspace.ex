@@ -7,6 +7,9 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @failed_bootstrap_marker ".symphony-bootstrap-failed"
+  @quarantine_marker ".symphony-quarantined"
+  @quarantine_directory ".symphony-quarantine"
 
   @type worker_host :: String.t() | nil
 
@@ -18,7 +21,8 @@ defmodule SymphonyElixir.Workspace do
     try do
       safe_id = workspace_key(issue_or_identifier)
 
-      with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
+      with :ok <- ensure_not_quarantined(safe_id),
+           {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
@@ -26,7 +30,11 @@ defmodule SymphonyElixir.Workspace do
             {:ok, workspace}
 
           {:error, _reason} = error ->
-            cleanup_failed_new_workspace(workspace, created?, worker_host)
+            if created? do
+              mark_workspace_bootstrap_failed(workspace, worker_host)
+              Logger.warning("Preserving workspace after creation hook failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
+            end
+
             error
         end
       end
@@ -37,14 +45,38 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec quarantine_issue(map() | String.t(), String.t(), worker_host()) :: :ok | {:error, term()}
+  def quarantine_issue(issue_or_identifier, _reason, worker_host) do
+    safe_id = workspace_key(issue_or_identifier)
+
+    with :ok <- persist_issue_quarantine(safe_id),
+         {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host) do
+      quarantine_workspace(workspace, worker_host)
+    end
+  end
+
+  @spec quarantined_issue?(map() | String.t()) :: boolean()
+  def quarantined_issue?(issue_or_identifier) do
+    safe_id = workspace_key(issue_or_identifier)
+    File.regular?(issue_quarantine_path(safe_id))
+  end
+
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
-        {:ok, workspace, false}
+        cond do
+          File.exists?(Path.join(workspace, @quarantine_marker)) ->
+            {:error, {:workspace_quarantined, workspace}}
+
+          File.exists?(Path.join(workspace, @failed_bootstrap_marker)) ->
+            {:error, {:workspace_bootstrap_incomplete, workspace}}
+
+          true ->
+            {:ok, workspace, false}
+        end
 
       File.exists?(workspace) ->
-        File.rm_rf!(workspace)
-        create_workspace(workspace)
+        {:error, {:workspace_path_conflict, workspace, :not_a_directory}}
 
       true ->
         create_workspace(workspace)
@@ -52,16 +84,28 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp ensure_workspace(workspace, worker_host) when is_binary(worker_host) do
+    workspace_root = Config.settings!().workspace.root
+
     script =
       [
         "set -eu",
+        remote_shell_assign("workspace_root", workspace_root),
         remote_shell_assign("workspace", workspace),
+        "mkdir -p \"$workspace_root\"",
+        "workspace_root=$(cd \"$workspace_root\" && pwd -P)",
+        "workspace_parent=$(dirname \"$workspace\")",
+        "mkdir -p \"$workspace_parent\"",
+        "workspace=\"$(cd \"$workspace_parent\" && pwd -P)/$(basename \"$workspace\")\"",
+        "case \"$workspace/\" in \"$workspace_root/\"*) ;; *) echo \"workspace is outside configured root: $workspace\" >&2; exit 73 ;; esac",
+        "if [ -f \"$workspace_root/#{@quarantine_directory}/$(basename \"$workspace\")\" ]; then echo \"issue is quarantined; reconcile and clear it explicitly: $workspace\" >&2; exit 75; fi",
+        "if [ -L \"$workspace\" ]; then echo \"refusing symlink workspace path: $workspace\" >&2; exit 73; fi",
+        "if [ -f \"$workspace/#{@quarantine_marker}\" ]; then echo \"workspace is quarantined; reconcile and clear the marker explicitly: $workspace\" >&2; exit 75; fi",
+        "if [ -f \"$workspace/#{@failed_bootstrap_marker}\" ]; then echo \"workspace bootstrap previously failed; manual reconciliation required: $workspace\" >&2; exit 74; fi",
         "if [ -d \"$workspace\" ]; then",
         "  created=0",
         "elif [ -e \"$workspace\" ]; then",
-        "  rm -rf \"$workspace\"",
-        "  mkdir -p \"$workspace\"",
-        "  created=1",
+        "  echo \"workspace path exists and is not a directory: $workspace\" >&2",
+        "  exit 73",
         "else",
         "  mkdir -p \"$workspace\"",
         "  created=1",
@@ -85,9 +129,77 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp create_workspace(workspace) do
-    File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, workspace, true}
+  end
+
+  defp mark_workspace_bootstrap_failed(workspace, nil) do
+    File.write(Path.join(workspace, @failed_bootstrap_marker), "after_create hook failed; manual reconciliation required\n")
+  end
+
+  defp mark_workspace_bootstrap_failed(workspace, worker_host) when is_binary(worker_host) do
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "printf '%s\\n' 'after_create hook failed; manual reconciliation required' > \"$workspace/#{@failed_bootstrap_marker}\""
+      ]
+      |> Enum.join("\n")
+
+    run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
+  end
+
+  defp quarantine_workspace(workspace, nil) do
+    if File.dir?(workspace) do
+      case File.write(
+             Path.join(workspace, @quarantine_marker),
+             "Symphony quarantined this workspace; reconcile it before reuse.\n"
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp quarantine_workspace(workspace, worker_host) when is_binary(worker_host) do
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "if [ -d \"$workspace\" ] && [ ! -L \"$workspace\" ]; then",
+        "  printf '%s\\n' 'Symphony quarantined this workspace; reconcile it before reuse.' > \"$workspace/#{@quarantine_marker}\"",
+        "fi"
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} -> :ok
+      {:ok, {output, status}} -> {:error, {:workspace_quarantine_failed, worker_host, status, output}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_issue_quarantine(safe_id) do
+    quarantine_path = issue_quarantine_path(safe_id)
+
+    case File.mkdir_p(Path.dirname(quarantine_path)) do
+      :ok -> File.write(quarantine_path, "quarantined\n")
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_not_quarantined(safe_id) do
+    if File.regular?(issue_quarantine_path(safe_id)) do
+      {:error, {:workspace_quarantined, safe_id}}
+    else
+      :ok
+    end
+  end
+
+  defp issue_quarantine_path(safe_id) do
+    Config.local_workspace_root()
+    |> Path.join(@quarantine_directory)
+    |> Path.join(safe_id)
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -301,30 +413,6 @@ defmodule SymphonyElixir.Workspace do
 
       false ->
         :ok
-    end
-  end
-
-  defp cleanup_failed_new_workspace(_workspace, false, _worker_host), do: :ok
-
-  defp cleanup_failed_new_workspace(workspace, true, nil) do
-    case File.rm_rf(workspace) do
-      {:ok, _removed} ->
-        :ok
-
-      {:error, reason, path} ->
-        Logger.warning("Failed to remove partial workspace path=#{path} reason=#{inspect(reason)}")
-    end
-  end
-
-  defp cleanup_failed_new_workspace(workspace, true, worker_host) when is_binary(worker_host) do
-    script = [remote_shell_assign("workspace", workspace), "rm -rf \"$workspace\""] |> Enum.join("\n")
-
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
-      {:ok, {_output, 0}} ->
-        :ok
-
-      result ->
-        Logger.warning("Failed to remove partial workspace worker_host=#{worker_host_for_log(worker_host)} result=#{inspect(result)}")
     end
   end
 

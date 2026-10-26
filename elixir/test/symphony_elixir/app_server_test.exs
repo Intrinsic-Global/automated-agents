@@ -95,11 +95,15 @@ defmodule SymphonyElixir.AppServerTest do
       while IFS= read -r _line; do
         count=$((count + 1))
         case "$count" in
-          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          1)
+            printf '%s\n' 'warning: initialization emitted diagnostic'
+            printf '%s\n' '{"id":1,"result":{}}'
+            ;;
           2) ;;
           3) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-timeout"}}}' ;;
           4)
             printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-timeout"}}}'
+            printf '%s\n' 'ERROR codex_models_manager failed to refresh available models: request timed out'
             sleep 0.15
             printf '%s\n' '{"method":"item/updated","params":{"item":{"id":"one"}}}'
             sleep 0.15
@@ -131,7 +135,13 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:error, :turn_timeout} = AppServer.run(workspace, "stream updates", issue)
+      test_pid = self()
+
+      assert {:error, :turn_timeout} =
+               AppServer.run(workspace, "stream updates", issue, on_message: fn update -> send(test_pid, {:codex_update, update}) end)
+
+      assert_receive {:codex_update, %{event: :stream_log, stream: "response", message: "warning: initialization emitted diagnostic"}}
+      assert_receive {:codex_update, %{event: :stream_log, message: "ERROR codex_models_manager failed to refresh available models: request timed out"}}
 
       File.write!(codex_binary, """
       #!/bin/sh

@@ -345,6 +345,7 @@ defmodule SymphonyElixir.StatusDashboard do
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
+        agent_log_rows = format_agent_log_rows(running)
         backoff_rows = format_retry_rows(retrying)
 
         ([
@@ -372,6 +373,7 @@ defmodule SymphonyElixir.StatusDashboard do
          ] ++
            running_rows ++
            running_to_backoff_spacer ++
+           agent_log_rows ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -586,6 +588,34 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Enum.map(&format_running_summary(&1, running_event_width))
     end
   end
+
+  defp format_agent_log_rows(running) do
+    rows =
+      running
+      |> Enum.flat_map(fn entry ->
+        identifier = Map.get(entry, :identifier, "unknown")
+
+        entry
+        |> Map.get(:recent_codex_logs, [])
+        |> Enum.map(fn log ->
+          at = format_log_timestamp(Map.get(log, :at))
+          message = log |> Map.get(:message, "") |> strip_ansi() |> String.replace(~r/\s+/, " ")
+          "│  #{identifier} #{at} #{message}"
+        end)
+      end)
+
+    case rows do
+      [] -> []
+      _ -> [colorize("├─ Recent agent log output", @ansi_bold), "│"] ++ rows ++ ["│"]
+    end
+  end
+
+  defp format_log_timestamp(%DateTime{} = timestamp),
+    do: timestamp |> DateTime.to_time() |> Time.to_string()
+
+  defp format_log_timestamp(_), do: "unknown-time"
+
+  defp strip_ansi(text), do: String.replace(text, ~r/\e\[[0-9;]*m/, "")
 
   # credo:disable-for-next-line
   defp format_running_summary(running_entry, running_event_width) do
