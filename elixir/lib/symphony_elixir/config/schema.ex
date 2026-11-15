@@ -213,6 +213,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
+      field(:max_tool_calls_per_turn, :integer, default: 100)
+      field(:max_tokens_per_turn, :integer, default: 0)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
     end
@@ -228,6 +230,8 @@ defmodule SymphonyElixir.Config.Schema do
           :thread_sandbox,
           :turn_sandbox_policy,
           :turn_timeout_ms,
+          :max_tool_calls_per_turn,
+          :max_tokens_per_turn,
           :read_timeout_ms,
           :stall_timeout_ms
         ],
@@ -242,6 +246,8 @@ defmodule SymphonyElixir.Config.Schema do
         end
       end)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
+      |> validate_number(:max_tool_calls_per_turn, greater_than: 0)
+      |> validate_number(:max_tokens_per_turn, greater_than_or_equal_to: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
     end

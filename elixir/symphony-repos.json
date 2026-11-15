@@ -7,7 +7,7 @@
       "jj_repo": "$PRF_JJ_REPO",
       "producer_root": "$PRF_PRODUCER_ROOT",
       "reviewer_root": "$PRF_REVIEWER_ROOT",
-      "staging_bookmark": "agent-c-staging",
+      "staging_bookmark": "symphony-staging",
       "bookmark_prefix": "symphony/",
       "workspace_prefix": "symphony-stage",
       "validation": [
@@ -19,6 +19,9 @@
           "bb",
           "backstop"
         ]
+      ],
+      "candidate_validation": [
+        ["bb", "backstop:fast"]
       ],
       "issues": {
         "PRO-94": [
@@ -54,6 +57,74 @@
           "examples/assured-operations/",
           "docs/",
           "CHANGELOG.md"
+        ],
+        "PRO-124": [
+          "src/resolver_sim/research/",
+          "src/resolver_sim/network/researcher_challenges.clj",
+          "src/resolver_sim/benchmark/verified_researcher_run.clj",
+          "src/resolver_sim/benchmark/researcher_run_report.clj",
+          "src/resolver_sim/benchmark/researcher_reward.clj",
+          "src/resolver_sim/benchmark/researcher_force_authorisation.clj",
+          "src/resolver_sim/benchmark/researcher_axis.clj",
+          "src/resolver_sim/benchmark/researcher_position.clj",
+          "src/resolver_sim/resubmission/receipt_obligation.clj",
+          "src/resolver_sim/economics/with_bounty/obligation_settlement.clj",
+          "src/resolver_sim/commands/researcher.clj",
+          "test/resolver_sim/research/",
+          "test/resolver_sim/benchmark/researcher_axis_test.clj",
+          "test/resolver_sim/benchmark/researcher_force_authorisation_test.clj",
+          "test/resolver_sim/benchmark/researcher_integration_test.clj",
+          "test/resolver_sim/benchmark/researcher_position_test.clj",
+          "test/resolver_sim/benchmark/researcher_run_report_test.clj",
+          "test/resolver_sim/benchmark/researcher_reward_test.clj",
+          "test/resolver_sim/benchmark/researcher_decision_v2_test.clj",
+          "test/resolver_sim/benchmark/verified_researcher_run_test.clj",
+          "test/resolver_sim/resubmission/receipt_obligation_test.clj",
+          "test/resolver_sim/resubmission/receipt_obligation_store_test.clj",
+          "test/resolver_sim/commands/researcher_command_test.clj",
+          "test/resolver_sim/economics/with_bounty/obligation_settlement_test.clj",
+          "test/fixtures/signing-keys/test-researcher-signing-key.pub",
+          "test/fixtures/signing-keys/test-researcher-signing-trust-policy.edn",
+          "test/fixtures/test-researcher.pub",
+          "docs/research/",
+          "docs/architecture/RESEARCHER_REWARDS.md",
+          "examples/researcher-challenges/"
+        ],
+        "PRO-15": [
+          "src/resolver_sim/research/researcher_challenges_cli.clj",
+          "test/resolver_sim/research/researcher_challenges_test.clj"
+        ],
+        "PRO-73": [
+          "src/resolver_sim/benchmark/review/three_member_certificate.clj",
+          "src/resolver_sim/benchmark/dimension_support.clj",
+          "src/resolver_sim/benchmark/replication_observation_set.clj",
+          "src/resolver_sim/research/ratification.clj",
+          "protocols_src/resolver_sim/protocols/sew/research_ratification.clj",
+          "test/resolver_sim/benchmark/review/three_member_certificate_test.clj",
+          "test/resolver_sim/benchmark/review/consensus_invariants_test.clj",
+          "test/resolver_sim/benchmark/dimension_support_test.clj",
+          "test/resolver_sim/benchmark/replication_observation_set_test.clj",
+          "test/resolver_sim/benchmark/researcher_integration_test.clj",
+          "test/resolver_sim/research/ratification_test.clj",
+          "test/resolver_sim/research/ratification_demo_contract_test.clj",
+          "protocols_src/test/resolver_sim/protocols/sew/research_resolution_test.clj",
+          "test/fixtures/review/version_transition_v2_v3.edn",
+          "docs/research/PRO-73-CONSENSUS-QUORUM-AUDIT.md"
+        ],
+        "PRO-117": [
+          "data/concepts/registry.edn",
+          "data/concepts/assurance/",
+          "docs/assurance/ASSURANCE_CASE_V0.md",
+          "examples/assurance-case-v0/",
+          "schemas/assurance-case.v0.json",
+          "test/resolver_sim/assurance/concept_registry_validation_test.clj",
+          "test/resolver_sim/assurance/assurance_case_v0_test.clj"
+        ],
+        "PRO-108": [
+          "docs/reference/usage.md",
+          "src/resolver_sim/commands/invariants_run.clj",
+          "src/resolver_sim/commands/verify_run.clj",
+          "test/resolver_sim/commands/invariants_run_test.clj"
         ]
       },
       "format_command": [
@@ -181,6 +252,11 @@
     "PRO-48": "prf",
     "PRO-88": "prf",
     "PRO-89": "prf",
+    "PRO-124": "prf",
+    "PRO-15": "prf",
+    "PRO-73": "prf",
+    "PRO-117": "prf",
+    "PRO-108": "prf",
     "PRO-46": "prf-evm",
     "PRO-20": "prf-site",
     "PRO-106": "prf-dev"

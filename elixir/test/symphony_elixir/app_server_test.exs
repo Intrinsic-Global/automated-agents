@@ -1404,6 +1404,68 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server reports failed and cancelled turn events" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-turn-terminal-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-TERMINAL")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      issue = %Issue{
+        id: "issue-turn-terminal",
+        identifier: "MT-TERMINAL",
+        title: "Terminal turn events",
+        description: "Preserve failure and cancellation status",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-TERMINAL",
+        labels: ["backend"]
+      }
+
+      for {method, event} <- [{"turn/failed", :turn_failed}, {"turn/cancelled", :turn_cancelled}] do
+        params = %{"reason" => "terminal"}
+        response = Jason.encode!(%{"method" => method, "params" => params})
+
+        File.write!(codex_binary, """
+        #!/bin/sh
+        count=0
+        while IFS= read -r _line; do
+          count=$((count + 1))
+          case "$count" in
+            1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+            2) ;;
+            3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-terminal"}}}' ;;
+            4)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-terminal"}}}'
+              printf '%s\\n' '#{response}'
+              exit 0
+              ;;
+            *) exit 0 ;;
+          esac
+        done
+        """)
+
+        File.chmod!(codex_binary, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server"
+        )
+
+        test_pid = self()
+        on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+        assert {:error, {^event, ^params}} =
+                 AppServer.run(workspace, "Observe terminal turn", issue, on_message: on_message)
+
+        assert_received {:app_server_message, %{event: ^event, payload: %{"params" => ^params}}}
+      end
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server does not pass tracker credentials to the local Codex child" do
     test_root =
       Path.join(

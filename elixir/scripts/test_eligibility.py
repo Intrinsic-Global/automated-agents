@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Adversarial tests for Symphony eligibility and workspace freshness."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import shutil
@@ -36,6 +37,8 @@ def commit(repo, rev='@-'):
 class EligibilityTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='symphony-eligibility-'))
+        self.previous_xdg_config_home = os.environ.get('XDG_CONFIG_HOME')
+        os.environ['XDG_CONFIG_HOME'] = str(self.root / 'xdg-config')
         self.repo = self.root / 'repo'
         self.repo.mkdir()
         run(['jj', 'git', 'init', '--colocate'], cwd=self.repo)
@@ -72,6 +75,10 @@ class EligibilityTest(unittest.TestCase):
         self.workspace.parent.mkdir(parents=True)
 
     def tearDown(self):
+        if self.previous_xdg_config_home is None:
+            os.environ.pop('XDG_CONFIG_HOME', None)
+        else:
+            os.environ['XDG_CONFIG_HOME'] = self.previous_xdg_config_home
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_state_json_write_is_private_and_leaves_no_temp_file(self):
@@ -87,6 +94,7 @@ class EligibilityTest(unittest.TestCase):
         return {
             'id': 'uuid-' + state,
             'identifier': 'PRO-999',
+            'description': 'test task contract',
             'state': {'name': state},
             'labels': {'nodes': []},
             'inverseRelations': {'nodes': nodes},
@@ -169,7 +177,7 @@ class EligibilityTest(unittest.TestCase):
         result = self.check('dispatch', self.issue([('PRO-880', 'Done')]), staging_tip=staging_tip)
         self.assertEqual(result['status'], 'blocked', result)
 
-    def test_workspace_fresh_then_stale_ancestor(self):
+    def test_workspace_fresh_then_pinned_ancestor_remains_resumable(self):
         self.record_workspace()
         fresh = self.check('resume', self.issue([], 'In Progress'))
         self.assertEqual(fresh['status'], 'eligible', fresh)
@@ -178,8 +186,9 @@ class EligibilityTest(unittest.TestCase):
         next_commit = commit(self.repo)
         jj(self.repo, 'bookmark', 'set', 'staging', '-r', next_commit)
         stale = self.check('resume', self.issue([], 'In Progress'))
-        self.assertEqual(stale['status'], 'stale', stale)
-        self.assertIn('workspace_base_is_stale_ancestor', stale['reasons'])
+        self.assertEqual(stale['status'], 'eligible', stale)
+        self.assertIn('workspace_base_behind_staging; preserving the pinned workspace base', stale['warnings'])
+        self.assertEqual(self.base, stale['workspace']['base'])
 
     def test_workspace_diverged(self):
         first = self.base
@@ -246,6 +255,135 @@ class EligibilityTest(unittest.TestCase):
         result = self.check('review', self.issue([], 'In Review'))
         self.assertEqual(result['status'], 'blocked', result)
         self.assertIn('candidate_missing', result['reasons'])
+
+    def prepare_review_candidate(self, candidate=None):
+        candidate = candidate or self.base
+        self.record_workspace()
+        elig.record_candidate(
+            'PRO-999', candidate, self.base,
+            explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+        )
+        self.publish_candidate(candidate)
+        return candidate
+
+    def test_same_review_identity_is_claimed_once_and_stays_blocked_after_restart(self):
+        candidate = self.prepare_review_candidate()
+        issue = self.issue([], 'In Review')
+        first = elig.claim_review_attempt(
+            'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            issue_data=issue,
+        )
+        self.assertTrue(first['claimed'], first)
+
+        for _ in range(100):
+            result = self.check('review', issue)
+            self.assertEqual(result['status'], 'review_attempt_seen', result)
+            self.assertEqual(result['review_identity'], first['identity'])
+
+        # A fresh process reads the same durable claim and cannot acquire it.
+        second = elig.claim_review_attempt(
+            'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            issue_data=issue,
+        )
+        self.assertFalse(second['claimed'], second)
+        self.assertEqual(second['identity'], first['identity'])
+        saved = elig.load_state('PRO-999', explicit=str(self.state_dir))
+        self.assertEqual(candidate, saved['review_attempts'][first['identity']]['inputs']['candidate_commit'])
+
+    def test_concurrent_claims_for_same_candidate_have_one_winner(self):
+        self.prepare_review_candidate()
+        issue = self.issue([], 'In Review')
+
+        def claim():
+            return elig.claim_review_attempt(
+                'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+                issue_data=issue,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _index: claim(), range(2)))
+        self.assertEqual(sum(1 for result in results if result['claimed']), 1, results)
+
+    def test_terminal_findings_block_same_identity_but_changed_candidate_gets_new_identity(self):
+        self.prepare_review_candidate()
+        issue = self.issue([], 'In Review')
+        claimed = elig.claim_review_attempt(
+            'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            issue_data=issue,
+        )
+        finished = elig.finish_review_attempt(
+            'PRO-999', 'inconclusive', 'review requested changes',
+            explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+        )
+        self.assertEqual(finished['status'], 'quarantined')
+        self.assertEqual(self.check('review', issue)['status'], 'review_attempt_seen')
+
+        (self.repo / 'new-candidate.txt').write_text('repaired candidate\n')
+        run(['jj', 'commit', '-m', 'repaired candidate'], cwd=self.repo)
+        changed = commit(self.repo)
+        elig.record_candidate(
+            'PRO-999', changed, self.base,
+            explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+        )
+        self.publish_candidate(changed)
+        self.assertEqual(self.check('review', issue)['status'], 'eligible')
+        next_claim = elig.claim_review_attempt(
+            'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            issue_data=issue,
+        )
+        self.assertTrue(next_claim['claimed'], next_claim)
+        self.assertNotEqual(claimed['identity'], next_claim['identity'])
+
+    def test_operator_retry_requires_reason_and_reuses_identity_explicitly(self):
+        self.prepare_review_candidate()
+        issue = self.issue([], 'In Review')
+        first = elig.claim_review_attempt(
+            'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            issue_data=issue,
+        )
+        elig.finish_review_attempt(
+            'PRO-999', 'crashed', 'Codex exited',
+            explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+        )
+        with self.assertRaisesRegex(RuntimeError, 'requires a reason'):
+            elig.authorize_review_retry(
+                'PRO-999', first['identity'], '',
+                explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            )
+        authorized = elig.authorize_review_retry(
+            'PRO-999', first['identity'], 'operator reconciled the failed run',
+            explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+        )
+        self.assertEqual(authorized['status'], 'retry_authorized')
+        second = elig.claim_review_attempt(
+            'PRO-999', explicit_config=str(self.config), explicit_state_dir=str(self.state_dir),
+            issue_data=issue,
+        )
+        self.assertTrue(second['claimed'], second)
+        self.assertEqual(second['identity'], first['identity'])
+
+    def test_review_identity_ignores_comments_and_updated_at_but_binds_task_description_and_policy(self):
+        self.prepare_review_candidate()
+        issue = self.issue([], 'In Review')
+        cfg = elig.resolve_repo('PRO-999', str(self.config))
+        state = elig.load_state('PRO-999', cfg, str(self.state_dir))
+        identity, inputs = elig.review_identity('PRO-999', issue, state, cfg)
+        metadata_only = dict(issue, updatedAt='later', comments=['reviewer comment'])
+        same, _ = elig.review_identity('PRO-999', metadata_only, state, cfg)
+        changed_description, _ = elig.review_identity(
+            'PRO-999', dict(issue, description='changed acceptance criteria'), state, cfg
+        )
+        changed_title, _ = elig.review_identity(
+            'PRO-999', dict(issue, title='changed review task'), state, cfg
+        )
+        changed_policy, _ = elig.review_identity(
+            'PRO-999', issue, state, cfg, policy_version='review-v2'
+        )
+        self.assertEqual(identity, same)
+        self.assertEqual(inputs['candidate_commit'], self.base)
+        self.assertNotEqual(identity, changed_description)
+        self.assertNotEqual(identity, changed_title)
+        self.assertNotEqual(identity, changed_policy)
 
     def test_quarantine_clears_only_after_published_candidate_and_review_preflight(self):
         self.record_workspace()

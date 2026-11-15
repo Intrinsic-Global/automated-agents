@@ -53,9 +53,27 @@ case "$action" in
       printf 'repo-scoped reviewer: no producer candidate for %s at %s\n' "$issue" "$src" >&2
     fi
     eligibility_script=${SYMPHONY_ELIGIBILITY_SCRIPT:-$script_dir/symphony_eligibility.py}
-    if ! python3 "$eligibility_script" check --issue "$issue" --phase review; then
+    set +e
+    python3 "$eligibility_script" check --issue "$issue" --phase review
+    status=$?
+    set -e
+    if [[ $status -eq 75 ]]; then
+      printf 'repo-scoped reviewer: review already attempted for %s; skipping Codex\n' "$issue" >&2
+      exit 75
+    elif [[ $status -ne 0 ]]; then
       printf 'repo-scoped reviewer: eligibility review handoff rejected for %s\n' "$issue" >&2
-      exit 1
+      exit "$status"
+    fi
+    set +e
+    python3 "$eligibility_script" claim-review --issue "$issue"
+    status=$?
+    set -e
+    if [[ $status -eq 75 ]]; then
+      printf 'repo-scoped reviewer: concurrent review claim for %s; skipping Codex\n' "$issue" >&2
+      exit 75
+    elif [[ $status -ne 0 ]]; then
+      printf 'repo-scoped reviewer: could not claim review identity for %s\n' "$issue" >&2
+      exit "$status"
     fi
     ;;
   *)

@@ -61,6 +61,87 @@ defmodule SymphonyElixir.Workspace do
     File.regular?(issue_quarantine_path(safe_id))
   end
 
+  @doc false
+  @spec continuation_attempts(map() | String.t()) :: non_neg_integer()
+  def continuation_attempts(issue_or_identifier) do
+    read_counter(issue_continuation_path(workspace_key(issue_or_identifier)))
+  end
+
+  @doc false
+  @spec record_continuation_attempt(map() | String.t(), non_neg_integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_continuation_attempt(issue_or_identifier, minimum_count \\ 0)
+      when is_integer(minimum_count) and minimum_count >= 0 do
+    path = issue_continuation_path(workspace_key(issue_or_identifier))
+    write_counter(path, continuation_attempts(issue_or_identifier), minimum_count)
+  end
+
+  @doc false
+  @spec clear_continuation_attempts(map() | String.t()) :: :ok | {:error, term()}
+  def clear_continuation_attempts(issue_or_identifier) do
+    remove_counter_file(issue_continuation_path(workspace_key(issue_or_identifier)))
+  end
+
+  @doc false
+  @spec failure_attempts(map() | String.t()) :: non_neg_integer()
+  def failure_attempts(issue_or_identifier) do
+    read_counter(issue_failure_path(workspace_key(issue_or_identifier)))
+  end
+
+  @doc false
+  @spec record_failure_attempt(map() | String.t(), non_neg_integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_failure_attempt(issue_or_identifier, minimum_count \\ 0)
+      when is_integer(minimum_count) and minimum_count >= 0 do
+    path = issue_failure_path(workspace_key(issue_or_identifier))
+    write_counter(path, failure_attempts(issue_or_identifier), minimum_count)
+  end
+
+  @doc false
+  @spec clear_failure_attempts(map() | String.t()) :: :ok | {:error, term()}
+  def clear_failure_attempts(issue_or_identifier) do
+    remove_counter_file(issue_failure_path(workspace_key(issue_or_identifier)))
+  end
+
+  defp read_counter(path) do
+    case File.read(path) do
+      {:ok, value} ->
+        case Integer.parse(String.trim(value)) do
+          {count, ""} when count >= 0 -> count
+          _ -> 1_000_000_000
+        end
+
+      {:error, :enoent} ->
+        0
+
+      {:error, _reason} ->
+        1_000_000_000
+    end
+  end
+
+  defp write_counter(path, existing, minimum_count) do
+    count = max(existing, minimum_count) + 1
+    temporary = path <> ".#{System.unique_integer([:positive])}.tmp"
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(temporary, "#{count}\n"),
+         :ok <- File.rename(temporary, path) do
+      {:ok, count}
+    else
+      {:error, reason} ->
+        File.rm(temporary)
+        {:error, reason}
+    end
+  end
+
+  defp remove_counter_file(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
@@ -202,6 +283,20 @@ defmodule SymphonyElixir.Workspace do
     |> Path.join(safe_id)
   end
 
+  defp issue_continuation_path(safe_id) do
+    Config.local_workspace_root()
+    |> Path.join(".symphony-state")
+    |> Path.join("continuations")
+    |> Path.join(safe_id)
+  end
+
+  defp issue_failure_path(safe_id) do
+    Config.local_workspace_root()
+    |> Path.join(".symphony-state")
+    |> Path.join("failures")
+    |> Path.join(safe_id)
+  end
+
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace), do: remove(workspace, nil)
 
@@ -329,7 +424,7 @@ defmodule SymphonyElixir.Workspace do
   def remove_issue_workspaces(_identifier, _worker_host), do: :ok
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
-          :ok | {:error, term()}
+          :ok | {:skip, term()} | {:error, term()}
   def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
@@ -524,6 +619,14 @@ defmodule SymphonyElixir.Workspace do
 
   defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
     :ok
+  end
+
+  defp handle_hook_command_result({output, 75}, workspace, issue_context, "before_run") do
+    sanitized_output = sanitize_hook_output_for_log(output)
+
+    Logger.info("Workspace hook skipped run hook=before_run #{issue_log_context(issue_context)} workspace=#{workspace} output=#{inspect(sanitized_output)}")
+
+    {:skip, {:workspace_hook_skipped, sanitized_output}}
   end
 
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do

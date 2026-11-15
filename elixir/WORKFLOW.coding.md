@@ -40,6 +40,9 @@ agent:
 codex:
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
   approval_policy: never
+  turn_timeout_ms: 900000
+  max_tool_calls_per_turn: 40
+  max_tokens_per_turn: 50000
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
@@ -51,7 +54,7 @@ codex:
 Issue: {{ issue.identifier }} — {{ issue.title }}
 Description: {{ issue.description }}
 
-**Scope:** Only PRO-71. If another issue is presented, do not edit anything. The checkout is a dedicated Git workspace, not a JJ staging workspace. Do not modify `agent-c-staging`, other `.workspaces`, `main`, release state, or the Linear task of another issue. Do not execute deployments or transactions.
+**Scope:** Only PRO-71. If another issue is presented, do not edit anything. The checkout is a dedicated Git workspace, not a JJ staging workspace. Do not modify `agent-c-staging`, `symphony-staging`, other `.workspaces`, `main`, release state, or the Linear task of another issue. Do not execute deployments or transactions.
 
 1. Validate the repository checkout and exact Git HEAD before implementing. If invalid, record a typed environment blocker in the issue and **leave the issue in In Progress** (never mislabel it In Review). End without trying to repair other users' workspaces.
 2. Move Todo to In Progress. Read the workpad and actual issue acceptance. Reproduce the alleged missing-custody/orphan-bond defect on the pinned commit, and retain focused failing regression cases.

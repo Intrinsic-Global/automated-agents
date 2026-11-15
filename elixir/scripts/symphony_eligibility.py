@@ -33,6 +33,7 @@ STAGE_ROOT = CODE_ROOT / 'staging-integrations'
 RE_SHA = re.compile(r'^[0-9a-f]{40}$')
 RE_ISSUE = re.compile(r'^[A-Z][A-Z0-9]*-[0-9]+$')
 SCHEMA = 'symphony-issue-eligibility.v1'
+REVIEW_POLICY_VERSION = 'review-v1'
 TERMINAL_DEPENDENCY_STATE = 'done'
 DEFAULT_TERMINAL_STATES = {'done', 'canceled', 'cancelled', 'duplicate'}
 PHASES = ('dispatch', 'resume', 'review', 'stage')
@@ -56,7 +57,7 @@ def run(argv, cwd=None, check=True):
 
 def jj(repo, *args):
     # Eligibility is read-only; never snapshot another owner's working copy.
-    return run(['jj', '--ignore-working-copy', '-R', str(repo), *args])
+    return run(['jj', '--ignore-working-copy', '-R', str(repo), *args], cwd=repo)
 
 
 def jj_commit(repo, rev):
@@ -107,7 +108,7 @@ def legacy_repo():
         'jj_repo': os.environ.get('SYMPHONY_JJ_REPO', str(Path.home() / '.local/share/symphony/staging')),
         'producer_root': os.environ.get('SYMPHONY_PRODUCER_ROOT', str(CODE_ROOT / 'producers')),
         'reviewer_root': os.environ.get('SYMPHONY_REVIEWER_ROOT', str(CODE_ROOT / 'reviewers')),
-        'staging_bookmark': 'agent-c-staging',
+        'staging_bookmark': 'symphony-staging',
         'bookmark_prefix': 'symphony/',
         'scopes': {},
     }
@@ -268,7 +269,7 @@ def graphql(query, variables):
 def linear_issue(issue):
     data = graphql(
         '''query($id:String!){issue(id:$id){
-             id identifier state{name} labels{nodes{id name}}
+             id identifier description state{name} labels{nodes{id name}}
              inverseRelations{nodes{type issue{id identifier state{name}}}}
              team{states{nodes{id name}}}
            }}''',
@@ -432,7 +433,156 @@ def review_state(issue, state, cfg, explicit_state_dir=None):
     return {'ok': True, 'reason': 'review_bound', 'candidate': candidate}
 
 
-def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, staging_tip=None, linear_data=None):
+def review_identity(issue, issue_data, state, cfg, policy_version=REVIEW_POLICY_VERSION):
+    """Hash only the immutable inputs that determine one independent review."""
+    candidate_data = state.get('candidate') or {}
+    candidate = candidate_data.get('sha')
+    base = state.get('staging_base') or candidate_data.get('base')
+    if not RE_SHA.fullmatch(str(candidate)) or not RE_SHA.fullmatch(str(base)):
+        fail('review identity requires a pinned candidate and base')
+    producer = Path(cfg.get('producer_root', '')).expanduser() / issue
+    tree = run(['git', '-C', str(producer), 'rev-parse', '--verify', f'{candidate}^{{tree}}'])
+    if not RE_SHA.fullmatch(tree):
+        fail('review candidate tree is not a valid Git object')
+    scope = sorted(set((cfg.get('scopes') or {}).get(issue) or []))
+    inputs = {
+        'schema': 'symphony-review-identity.v1',
+        'issue_id': issue_data.get('id') or issue,
+        'issue_identifier': issue,
+        'repository': {
+            'name': cfg.get('name'),
+            'remote': cfg.get('remote'),
+        },
+        'candidate_commit': candidate,
+        'candidate_tree': tree,
+        'effective_base': base,
+        'scope': scope,
+        'task_title': issue_data.get('title') or '',
+        'task_description_sha256': hashlib.sha256(
+            str(issue_data.get('description') or '').encode('utf-8')
+        ).hexdigest(),
+        'policy_version': policy_version,
+    }
+    canonical = json.dumps(inputs, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest(), inputs
+
+
+def review_attempt_for(state, identity):
+    return (state.get('review_attempts') or {}).get(identity)
+
+
+def claim_review_attempt(issue, explicit_config=None, explicit_state_dir=None,
+                         policy_version=REVIEW_POLICY_VERSION, issue_data=None):
+    cfg = resolve_repo(issue, explicit_config)
+    issue_data = issue_data or linear_issue(issue)
+    state = load_state(issue, cfg, explicit_state_dir)
+    identity, inputs = review_identity(issue, issue_data, state, cfg, policy_version)
+    outcome = {}
+
+    def mutate(current):
+        attempts = current.setdefault('review_attempts', {})
+        existing = attempts.get(identity)
+        active_identity = current.get('active_review_identity')
+        active = attempts.get(active_identity) if active_identity else None
+        if existing is not None and existing.get('status') != 'retry_authorized':
+            outcome.update({'claimed': False, 'identity': identity, 'existing': existing})
+            return current
+        if active and active.get('status') == 'running':
+            outcome.update({
+                'claimed': False,
+                'identity': identity,
+                'reason': 'another review identity is already running for this issue',
+                'existing': active,
+            })
+            return current
+        attempts[identity] = {
+            'identity': identity,
+            'inputs': inputs,
+            'status': 'running',
+            'attempt_number': (existing or {}).get('attempt_number', 0) + 1,
+            'claimed_at': now(),
+            'finished_at': None,
+            'outcome': None,
+            'reason': None,
+        }
+        current['active_review_identity'] = identity
+        append_event(current, 'review-claim', 'claimed', f'identity={identity}', current.get('staging_base'))
+        outcome.update({'claimed': True, 'identity': identity})
+        return current
+
+    update_state(issue, mutate, cfg, explicit_state_dir)
+    return outcome
+
+
+def finish_review_attempt(issue, outcome, reason=None, explicit_config=None, explicit_state_dir=None):
+    if outcome not in ('decision', 'inconclusive', 'budget_exceeded', 'crashed'):
+        fail('invalid review attempt outcome')
+    cfg = resolve_repo(issue, explicit_config)
+    result = {}
+
+    def mutate(state):
+        identity = state.get('active_review_identity')
+        record = (state.get('review_attempts') or {}).get(identity)
+        if not identity or not record:
+            fail('no active review claim to finish')
+        if record.get('status') != 'running':
+            result.update({'identity': identity, 'status': record.get('status')})
+            return state
+        terminal = 'completed' if outcome == 'decision' else 'quarantined'
+        record.update({
+            'status': terminal,
+            'outcome': outcome,
+            'reason': reason,
+            'finished_at': now(),
+        })
+        state['active_review_identity'] = None
+        append_event(state, 'review-claim', terminal, f'identity={identity};outcome={outcome}', state.get('staging_base'))
+        result.update({'identity': identity, 'status': terminal})
+        return state
+
+    update_state(issue, mutate, cfg, explicit_state_dir)
+    return result
+
+
+def authorize_review_retry(issue, identity, reason, explicit_config=None, explicit_state_dir=None):
+    """Record an explicit operator decision to retry one completed review identity."""
+    if not reason or not reason.strip():
+        fail('an explicit retry requires a reason')
+    cfg = resolve_repo(issue, explicit_config)
+    result = {}
+
+    def mutate(state):
+        attempts = state.get('review_attempts') or {}
+        record = attempts.get(identity)
+        if not record:
+            fail('review identity does not exist')
+        candidate = (state.get('candidate') or {}).get('sha')
+        if candidate != (record.get('inputs') or {}).get('candidate_commit'):
+            fail('review identity is not for the current candidate')
+        if record.get('status') == 'running':
+            fail('cannot authorize retry while the review is running')
+        record['status'] = 'retry_authorized'
+        record['retry_authorized_at'] = now()
+        record['retry_authorization_reason'] = reason.strip()
+        append_event(state, 'review-claim', 'retry-authorized', f'identity={identity};reason={reason.strip()}', state.get('staging_base'))
+        result.update({'identity': identity, 'status': record['status']})
+        return state
+
+    update_state(issue, mutate, cfg, explicit_state_dir)
+    return result
+
+
+def review_attempt_seen(issue, issue_data, state, cfg, policy_version=REVIEW_POLICY_VERSION):
+    candidate = ((state.get('candidate') or {}).get('sha'))
+    if not candidate:
+        return None
+    identity, _inputs = review_identity(issue, issue_data, state, cfg, policy_version)
+    record = review_attempt_for(state, identity)
+    return {'identity': identity, 'record': record} if record else {'identity': identity, 'record': None}
+
+
+def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, staging_tip=None,
+                linear_data=None, policy_version=REVIEW_POLICY_VERSION):
     if phase not in PHASES:
         fail('phase must be one of: ' + ', '.join(PHASES))
     if not RE_ISSUE.fullmatch(issue):
@@ -458,6 +608,7 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
     state['dependencies'] = deps
 
     reasons = []
+    warnings = []
     status = 'eligible'
     if dep_errors:
         status = 'blocked'
@@ -474,8 +625,11 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
         if workspace_base:
             state['staging_base'] = state.get('staging_base') or workspace_base
         if workspace_state == 'stale_ancestor':
-            status = 'stale'
-            reasons.append('workspace_base_is_stale_ancestor')
+            if phase == 'resume':
+                warnings.append('workspace_base_behind_staging; preserving the pinned workspace base')
+            else:
+                status = 'stale'
+                reasons.append('workspace_base_is_stale_ancestor')
         elif workspace_state == 'diverged':
             status = 'diverged'
             reasons.append('workspace_base_diverged_from_staging')
@@ -488,6 +642,7 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
 
     candidate = ((state.get('candidate') or {}).get('sha'))
     review_check = None
+    review_identity_data = None
     if phase in ('review', 'stage'):
         if not candidate or not RE_SHA.fullmatch(str(candidate)):
             status = 'blocked'
@@ -521,8 +676,11 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
             reasons.append('staging_base_missing')
         elif base != staging_tip:
             if jj_is_ancestor(repo, base, staging_tip):
-                status = 'stale'
-                reasons.append('candidate_base_is_stale_ancestor')
+                if phase in ('review', 'stage'):
+                    warnings.append('candidate_base_behind_staging; staging admission must reconcile and qualify the combined tree')
+                else:
+                    status = 'stale'
+                    reasons.append('candidate_base_is_stale_ancestor')
             else:
                 status = 'diverged'
                 reasons.append('candidate_base_diverged_from_staging')
@@ -532,12 +690,25 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
                 status = 'blocked'
                 reasons.append('review_invalid:' + str(review_check['reason']))
 
+        if phase == 'review' and status == 'eligible':
+            try:
+                review_identity_data = review_attempt_seen(
+                    issue, issue_data, state, cfg, policy_version
+                )
+                if review_identity_data and review_identity_data['record']:
+                    status = 'review_attempt_seen'
+                    reasons.append('review_identity_already_attempted')
+            except Exception as exc:
+                status = 'blocked'
+                reasons.append('review_identity_unavailable:' + str(exc))
+
     result = {
         'schema': 'symphony-eligibility-result.v1',
         'issue': issue,
         'phase': phase,
         'status': status,
         'reasons': reasons,
+        'warnings': warnings,
         'staging_bookmark': cfg.get('staging_bookmark'),
         'staging_tip': staging_tip,
         'repo': cfg.get('name'),
@@ -549,6 +720,7 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
             'base': state.get('staging_base'),
         },
         'candidate': candidate,
+        'review_identity': (review_identity_data or {}).get('identity'),
         'review': review_check,
         'checked_at': now(),
     }
@@ -560,7 +732,8 @@ def check_phase(issue, phase, explicit_config=None, explicit_state_dir=None, sta
         current['workspace_revision'] = workspace_tip or current.get('workspace_revision')
         if state.get('staging_base'):
             current['staging_base'] = state.get('staging_base')
-        append_event(current, phase, status, ';'.join(reasons) if reasons else 'eligible', staging_tip)
+        event_detail = ';'.join(reasons) if reasons else ';'.join(warnings) if warnings else 'eligible'
+        append_event(current, phase, status, event_detail, staging_tip)
         return current
 
     update_state(issue, mutate, cfg, explicit_state_dir)
@@ -764,9 +937,44 @@ def cmd_check(args):
         args.phase,
         explicit_config=args.config,
         explicit_state_dir=args.state_dir,
+        policy_version=args.policy_version,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
+    if result['status'] == 'review_attempt_seen':
+        return 75
     return 0 if result['status'] == 'eligible' else 1
+
+
+def cmd_claim_review(args):
+    result = claim_review_attempt(
+        args.issue,
+        explicit_config=args.config,
+        explicit_state_dir=args.state_dir,
+        policy_version=args.policy_version,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get('claimed') else 75
+
+
+def cmd_finish_review(args):
+    result = finish_review_attempt(
+        args.issue,
+        args.outcome,
+        args.reason,
+        explicit_config=args.config,
+        explicit_state_dir=args.state_dir,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_authorize_review_retry(args):
+    result = authorize_review_retry(
+        args.issue, args.identity, args.reason,
+        explicit_config=args.config, explicit_state_dir=args.state_dir,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 
 def main(argv=None):
@@ -778,7 +986,26 @@ def main(argv=None):
     check = sub.add_parser('check')
     check.add_argument('--issue', required=True)
     check.add_argument('--phase', required=True, choices=PHASES)
+    check.add_argument('--policy-version', default=REVIEW_POLICY_VERSION)
     check.set_defaults(func=cmd_check)
+
+    claim_review = sub.add_parser('claim-review')
+    claim_review.add_argument('--issue', required=True)
+    claim_review.add_argument('--policy-version', default=REVIEW_POLICY_VERSION)
+    claim_review.set_defaults(func=cmd_claim_review)
+
+    finish_review = sub.add_parser('finish-review')
+    finish_review.add_argument('--issue', required=True)
+    finish_review.add_argument('--outcome', required=True,
+                               choices=('decision', 'inconclusive', 'budget_exceeded', 'crashed'))
+    finish_review.add_argument('--reason', default=None)
+    finish_review.set_defaults(func=cmd_finish_review)
+
+    retry_review = sub.add_parser('authorize-review-retry')
+    retry_review.add_argument('--issue', required=True)
+    retry_review.add_argument('--identity', required=True)
+    retry_review.add_argument('--reason', required=True)
+    retry_review.set_defaults(func=cmd_authorize_review_retry)
 
     workspace = sub.add_parser('record-workspace')
     workspace.add_argument('--issue', required=True)

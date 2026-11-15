@@ -24,6 +24,7 @@ ROLE_WORKFLOWS = {
     'reviewer-pro-rata': 'WORKFLOW.reviewer.pro-rata.md',
     'reviewer-protected-ops': 'WORKFLOW.reviewer.protected-ops.md',
     'reviewer-researcher-challenges': 'WORKFLOW.reviewer.researcher-challenges.md',
+    'integration-reviewer': 'WORKFLOW.integration-reviewer.md',
     'forensic-coding': 'WORKFLOW.forensic.md',
     'forensic-reviewer': 'WORKFLOW.forensic-reviewer.md',
 }
@@ -107,6 +108,9 @@ def validate_config(role, config, expected_workspace_root=None):
     elif role == 'coding-pro-106':
         if identifiers != ['PRO-106'] or slugs or excluded:
             fail('coding-pro-106 must be scoped only to issue PRO-106')
+    elif role == 'integration-reviewer':
+        if slugs or excluded != DEDICATED_PROJECT_SLUGS:
+            fail('integration-reviewer must cover PRF while excluding dedicated workflow projects')
 
     labels = tracker.get('required_labels') or []
     if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
@@ -117,7 +121,10 @@ def validate_config(role, config, expected_workspace_root=None):
         fail('tracker.active_states must be a list of strings')
     normalized_states = {state.strip().lower() for state in states}
 
-    if role.startswith('reviewer') or role == 'forensic-reviewer':
+    if role == 'integration-reviewer':
+        expected_labels = {'symphony-integration', 'symphony-integration-review'}
+        expected_states = {'in review'}
+    elif role.startswith('reviewer') or role == 'forensic-reviewer':
         expected_labels = {'symphony-pilot', 'symphony-pilot-review'}
         expected_states = {'in review'}
     else:

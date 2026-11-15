@@ -28,8 +28,14 @@ Tell your favorite coding agent to build Symphony in a programming language of y
 ### Option 2. Use our experimental reference implementation
 
 Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
+and run the Elixir-based Symphony implementation, including its bounded reviewer dispatch and
+retry protections. For the PRF host workflow, interactive/JJQ work and Symphony use separate staging
+refs (`agent-c-staging` and `symphony-staging`) so their writers cannot race. Reviewer-approved
+Symphony candidates receive a fast screen, then compatible candidates receive full staging
+qualification together; integration composes selected work from both streams and remains a separate gate.
+An isolated integration-reviewer lane can review that assembled candidate and record exact-range
+evidence; `prf-dev` still performs aggregate admission and guarded integration promotion.
+You can also ask your favorite coding agent to help with the setup:
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md

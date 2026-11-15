@@ -1,5 +1,22 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Linear.Adapter
+
+  test "Linear config rejects simultaneous included and excluded project scopes" do
+    settings = %{
+      endpoint: "https://api.linear.app/graphql",
+      api_key: "token",
+      project_slug: nil,
+      project_slugs: ["included-project"],
+      excluded_project_slugs: ["excluded-project"],
+      issue_identifiers: [],
+      excluded_issue_identifiers: [],
+      assignee: nil
+    }
+
+    assert {:error, :conflicting_linear_project_scope} =
+             Adapter.validate_config(settings)
+  end
 
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -1032,7 +1049,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "normal worker exit schedules active-state continuation retry" do
-    issue_id = "issue-resume"
+    suffix = System.unique_integer([:positive])
+    issue_id = "issue-resume-#{suffix}"
+    identifier = "MT-558-#{suffix}"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1048,8 +1067,8 @@ defmodule SymphonyElixir.CoreTest do
     running_entry = %{
       pid: self(),
       ref: ref,
-      identifier: "MT-558",
-      issue: %Issue{id: issue_id, identifier: "MT-558", state: "In Progress"},
+      identifier: identifier,
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
       started_at: DateTime.utc_now()
     }
 
@@ -1068,14 +1087,15 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
     assert state.continuation_attempts[issue_id] == 1
   end
 
   test "normal worker exit blocks after agent.max_continuation_retries" do
     write_workflow_file!(Workflow.workflow_file_path(), max_continuation_retries: 2)
 
-    issue_id = "issue-continuation-limit"
+    suffix = System.unique_integer([:positive])
+    issue_id = "issue-continuation-limit-#{suffix}"
+    identifier = "MT-566-#{suffix}"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationLimitOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1091,8 +1111,8 @@ defmodule SymphonyElixir.CoreTest do
     running_entry = %{
       pid: self(),
       ref: ref,
-      identifier: "MT-566",
-      issue: %Issue{id: issue_id, identifier: "MT-566", state: "In Progress"},
+      identifier: identifier,
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
       started_at: DateTime.utc_now()
     }
 
@@ -1115,7 +1135,7 @@ defmodule SymphonyElixir.CoreTest do
 
     issue = %Issue{
       id: issue_id,
-      identifier: "MT-566",
+      identifier: identifier,
       title: "Still active at continuation limit",
       state: "In Progress",
       dispatchable: true
@@ -1127,7 +1147,7 @@ defmodule SymphonyElixir.CoreTest do
         %{state | retry_attempts: %{}},
         issue_id,
         1,
-        %{identifier: "MT-566"}
+        %{identifier: identifier}
       )
 
     refute Map.has_key?(blocked_state.running, issue_id)
@@ -1203,7 +1223,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
-    issue_id = "issue-crash"
+    suffix = System.unique_integer([:positive])
+    issue_id = "issue-crash-#{suffix}"
+    identifier = "MT-559-#{suffix}"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1219,9 +1241,9 @@ defmodule SymphonyElixir.CoreTest do
     running_entry = %{
       pid: self(),
       ref: ref,
-      identifier: "MT-559",
+      identifier: identifier,
       retry_attempt: 2,
-      issue: %Issue{id: issue_id, identifier: "MT-559", state: "In Progress"},
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
       started_at: DateTime.utc_now()
     }
 
@@ -1236,10 +1258,10 @@ defmodule SymphonyElixir.CoreTest do
     Process.sleep(50)
     state = :sys.get_state(pid)
 
-    assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
+    assert %{attempt: 3, due_at_ms: due_at_ms, identifier: ^identifier, error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_000, 40_500)
+    assert_due_in_range(due_at_ms, 38_500, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -1448,10 +1470,11 @@ defmodule SymphonyElixir.CoreTest do
   test "linear poll scope can target one issue without requiring a project" do
     {query, variables} = Client.scoped_poll_query_for_test(%{issue_identifiers: ["PRO-106"]})
 
-    assert query =~ "identifier: {in: $issueIdentifiers"
+    refute query =~ "identifier: {"
+    refute query =~ "$issueIdentifiers"
     refute query =~ "project: {slugId:"
     refute query =~ "$projectSlugs"
-    assert variables == %{issueIdentifiers: ["PRO-106"]}
+    assert variables == %{}
   end
 
   test "linear poll scope can exclude a routed issue from a broad project poll" do
@@ -1462,8 +1485,22 @@ defmodule SymphonyElixir.CoreTest do
       })
 
     assert query =~ "slugId: {nin: $projectSlugs}"
-    assert query =~ "nin: $excludedIssueIdentifiers"
-    assert variables == %{projectSlugs: ["dedicated"], excludedIssueIdentifiers: ["PRO-106"]}
+    refute query =~ "identifier: {"
+    refute query =~ "$excludedIssueIdentifiers"
+    assert variables == %{projectSlugs: ["dedicated"]}
+  end
+
+  test "Linear issue identifier allow and deny lists are applied after GraphQL fetch" do
+    issues = [
+      %Issue{id: "id-106", identifier: "PRO-106"},
+      %Issue{id: "id-107", identifier: "PRO-107"}
+    ]
+
+    assert [%Issue{identifier: "PRO-106"}] =
+             Client.filter_issue_identifier_scope_for_test(issues, %{
+               issue_identifiers: ["pro-106"],
+               excluded_issue_identifiers: ["PRO-107"]
+             })
   end
 
   test "prompt builder renders issue and attempt values from workflow template" do

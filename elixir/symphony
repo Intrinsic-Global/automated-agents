@@ -129,14 +129,14 @@ command -v mise >/dev/null || { echo "mise is required" >&2; exit 1; }
 command -v flock >/dev/null || { echo "flock is required for exclusive lane ownership" >&2; exit 1; }
 
 usage() {
-    echo "Usage: ./symphony [both|coding|coding-pro-106|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer]" >&2
+    echo "Usage: ./symphony [both|coding|coding-pro-106|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|integration-reviewer|forensic-coding|forensic-reviewer]" >&2
     exit 2
 }
 
 role="${1:-both}"
 [[ "$#" -le 1 ]] || usage
 case "$role" in
-    both|coding|coding-pro-106|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|forensic-coding|forensic-reviewer) ;;
+    both|coding|coding-pro-106|coding-pro-rata|coding-protected-ops|coding-researcher-challenges|reviewer|reviewer-pro-rata|reviewer-protected-ops|reviewer-researcher-challenges|integration-reviewer|forensic-coding|forensic-reviewer) ;;
     *) usage ;;
 esac
 
@@ -182,6 +182,10 @@ run_role() {
             workflow_file="$WORKTREE/WORKFLOW.reviewer.researcher-challenges.md"
             workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-reviewer-v1"
             ;;
+        integration-reviewer)
+            workflow_file="$WORKTREE/WORKFLOW.integration-reviewer.md"
+            workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-integration-reviewer"
+            ;;
         forensic-coding)
             workflow_file="$WORKTREE/WORKFLOW.forensic.md"
             workspace_root="$SYMPHONY_WORKSPACES_ROOT/prf-forensic-coding"
@@ -195,6 +199,26 @@ run_role() {
             return 2
             ;;
     esac
+
+    local source_repo="${SYMPHONY_JJ_SOURCE_REPO:-}"
+    local source_revision="symphony-staging"
+    if [[ "$selected_role" == coding-pro-106 ]]; then
+        source_repo="${PRF_DEV_JJ_REPO:-$CODE_ROOT/prf-dev}"
+        source_revision="@-"
+    fi
+
+    if [[ "$selected_role" != coding-pro-106 ]]; then
+        [[ -n "$source_repo" ]] || { echo "SYMPHONY_JJ_SOURCE_REPO is required for $selected_role" >&2; return 1; }
+        local staging_tip
+        if ! staging_tip=$(jj --ignore-working-copy -R "$source_repo" log --no-graph -r "$source_revision" -T commit_id 2>/dev/null); then
+            echo "Symphony staging ref is unavailable: $source_revision in $source_repo" >&2
+            return 1
+        fi
+        [[ "$staging_tip" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Symphony staging ref did not resolve to one commit: $source_revision" >&2
+            return 1
+        }
+    fi
 
     SYMPHONY_WORKSPACE_ROOT="$workspace_root" python3 "$WORKTREE/scripts/symphony_preflight.py" \
         --role "$selected_role" \
@@ -210,13 +234,6 @@ run_role() {
     if ! flock -n "$lane_lock_fd"; then
         echo "Symphony lane already has a running owner: role=$selected_role workspace_root=$workspace_root" >&2
         return 1
-    fi
-
-    local source_repo="${SYMPHONY_JJ_SOURCE_REPO:-}"
-    local source_revision="agent-c-staging"
-    if [[ "$selected_role" == coding-pro-106 ]]; then
-        source_repo="${PRF_DEV_JJ_REPO:-$CODE_ROOT/prf-dev}"
-        source_revision="@-"
     fi
 
     local -a process_args=(
@@ -238,6 +255,8 @@ run_role() {
         --setenv SYMPHONY_ELIXIR_ROOT "$WORKTREE"
         --setenv SYMPHONY_WORKSPACES_ROOT "$SYMPHONY_WORKSPACES_ROOT"
         --setenv SYMPHONY_REPO_CONFIG "${SYMPHONY_REPO_CONFIG:-}"
+        --setenv SYMPHONY_INTEGRATION_REVIEW_DIR "${SYMPHONY_INTEGRATION_REVIEW_DIR:-$CODE/.symphony-integration-reviews}"
+        --setenv SYMPHONY_REVIEWER_ID "symphony-integration-reviewer"
         --setenv SYMPHONY_ELIGIBILITY_SCRIPT "${SYMPHONY_ELIGIBILITY_SCRIPT:-$WORKTREE/scripts/symphony_eligibility.py}"
         --setenv SYMPHONY_STATE_DIR "${SYMPHONY_STATE_DIR:-}"
         --setenv CODEX_BIN "${CODEX_BIN:-codex}"

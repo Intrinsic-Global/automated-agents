@@ -21,6 +21,9 @@ agent:
 codex:
   command: codex app-server
   approval_policy: never
+  turn_timeout_ms: 900000
+  max_tool_calls_per_turn: 40
+  max_tokens_per_turn: 50000
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite

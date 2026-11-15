@@ -51,6 +51,7 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
+    overrides = Keyword.put_new(overrides, :workspace_root, Path.join(Path.dirname(path), "workspaces"))
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
 

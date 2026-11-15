@@ -59,12 +59,19 @@ hooks:
     set -eu
     if [ -f ./review-decision.json ]; then
       $SYMPHONY_ELIXIR_ROOT/scripts/review_decision_record.sh ./review-decision.json
+    fi
+    $SYMPHONY_ELIXIR_ROOT/scripts/review_attempt_finish.sh
+    if [ -f ./review-decision.json ]; then
       python3 $SYMPHONY_ELIXIR_ROOT/symphony-stage-reviewed.py ./review-decision.json
     fi
 agent:
   max_concurrent_agents: 2
   max_turns: 1
+  max_continuation_retries: 0
 codex:
+  turn_timeout_ms: 720000
+  max_tool_calls_per_turn: 30
+  max_tokens_per_turn: 100000
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
   approval_policy: never
   stall_timeout_ms: 3900000
@@ -93,7 +100,7 @@ If any of those is missing, treat it as a host/environment blocker: post the exa
 
 Do **not** approve issues whose acceptance requires authority you do not have: owner signatures, external approvals, deployments or transaction broadcasts, public-chain finality, spending, or missing prerequisite gates. Keep those blocked in `In Review` with a precise missing-evidence/authority comment. This explicitly includes PRO-47, PRO-53, PRO-54, PRO-87, PRO-97/PRO-98 before their prerequisites, and any Base Sepolia broadcast.
 
-The reviewer only writes `review-decision.json`. The host `after_run` gate performs the JJ staging merge and is the only actor that moves the issue to **Done**.
+The reviewer only writes `review-decision.json`. For PRF, the host `after_run` hook runs the fast candidate screen and queues the approved candidate; it does not move `symphony-staging`, create an accepted staging receipt, or mark the issue Done. The operator batch-qualification command performs full validation once for compatible candidates, then advances `symphony-staging`, records accepted receipts, and marks those issues Done. Integration promotion remains separate.
 
 Use the `linear_graphql` tool for every Linear write (`commentCreate`, `issueUpdate`). The app connector can require an unavailable approval and silently drop the write.
 
@@ -111,14 +118,14 @@ The producer checkout is `$SYMPHONY_WORKSPACES_ROOT/prf-coder-v2/{{ issue.identi
 ## If independently accepted
 
 1. Confirm the candidate's exact Git SHA and original base; review changed paths, tests and malicious/negative vectors, performance, permissions and fail-closed behavior. Verify no undisclosed changes, including to generated evidence, workflow infrastructure or staging target.
-2. The host gate source is `$SYMPHONY_ELIXIR_ROOT/symphony-stage-reviewed.py`; audit it there. Use `python3`, not `python` (the sandbox shell may lack a `python` alias). The sandbox shell may not expose `LINEAR_API_KEY`; the host `after_run` gate owns that credential and fails closed if it is absent, so do not block a decision solely because your shell reports it missing. Check the shared store read-only: `jj --ignore-working-copy -R "$SYMPHONY_JJ_REPO" log --no-graph -r agent-c-staging -T commit_id` and `jj --ignore-working-copy -R "$SYMPHONY_JJ_REPO" log --no-graph -r "agent-c-staging & bookmarks()" -T bookmarks`. The reviewer sandbox intentionally lacks write access to the shared store; `--ignore-working-copy` is required and a lock/write error without it is **not** a blocker. Only if the explicit `--ignore-working-copy` read fails, or `SYMPHONY_JJ_REPO` is missing/not a PRF JJ repo, keep In Review, remove both pilot labels, and explain the staging blocker. Do not mark Done.
+2. The host gate source is `$SYMPHONY_ELIXIR_ROOT/symphony-stage-reviewed.py`; audit it there. Use `python3`, not `python` (the sandbox shell may lack a `python` alias). The sandbox shell may not expose `LINEAR_API_KEY`; the host `after_run` gate owns that credential and fails closed if it is absent, so do not block a decision solely because your shell reports it missing. Check the shared store read-only: `jj --ignore-working-copy -R "$SYMPHONY_JJ_REPO" log --no-graph -r symphony-staging -T commit_id` and `jj --ignore-working-copy -R "$SYMPHONY_JJ_REPO" log --no-graph -r "symphony-staging & bookmarks()" -T bookmarks`. The reviewer sandbox intentionally lacks write access to the shared store; `--ignore-working-copy` is required and a lock/write error without it is **not** a blocker. Only if the explicit `--ignore-working-copy` read fails, or `SYMPHONY_JJ_REPO` is missing/not a PRF JJ repo, keep In Review, remove both pilot labels, and explain the staging blocker. Do not mark Done.
 3. Write `review-decision.json` in **this workspace** as the LAST step of your turn, with strictly this structure:
 
    ```json
    {"schema":"symphony-pilot-review-decision.v1","issue":"{{ issue.identifier }}","verdict":"approved","candidate_sha":"<40 lowercase hex Git SHA>","base_sha":"<40 lowercase hex Git SHA>","reviewed_tests":["<exact successful test command>"],"finding":"<independent concise finding>"}
    ```
 
-   The host-side `after_run` integration gate validates the decision, imports the exact commit into JJ, merges **only to `agent-c-staging`** in a new dedicated JJ workspace, independently runs staging validation, verifies ancestry and recorded state, and only then changes Linear to Done. Neither this agent nor the coding agent marks Done directly.
-4. Leave the issue `In Review` and do not push to Git main. If integration fails, the gate writes a failure report and removes the review label so the issue stays In Review without infinite retries; escalate that blocker. Preserve all existing named agent bookmarks/workspaces.
+   For PRF, the host-side `after_run` hook validates the decision, imports the exact commit into JJ, checks it with `bb backstop:fast`, and queues it without moving `symphony-staging`. An operator runs `python3 $SYMPHONY_ELIXIR_ROOT/symphony-stage-reviewed.py --qualify-pending prf <ISSUE ...>` to combine compatible pending candidates and run configured full validation once. Only after that passes does the host advance `symphony-staging`, record accepted receipts, and mark those issues Done. Integration promotion remains separate.
+4. Leave the issue `In Review` and do not push to Git main. If staging qualification fails, preserve the failure report and reconcile the pending candidate before retrying. Preserve all existing named agent bookmarks/workspaces.
 
-**Do not attempt a direct merge from inside Codex.** The trusted host integration gate is the only actor permitted to update `agent-c-staging`. Its script and environment must be audited before enabling it on real work.
+**Do not attempt a direct merge from inside Codex.** Only the host `symphony-stage-reviewed.py --qualify-pending` command may advance `symphony-staging`; it never writes `agent-c-staging`. Integration promotion remains a separate gate.

@@ -28,6 +28,9 @@ agent:
 codex:
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
   approval_policy: never
+  turn_timeout_ms: 900000
+  max_tool_calls_per_turn: 40
+  max_tokens_per_turn: 50000
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
@@ -59,13 +62,14 @@ Description: {{ issue.description }}
 - This lane is exclusively for PRO-106 and the `/home/user/Code/prf-dev` JJ repository. Verify `jj root` and `src/prf_dev/integration.py` before editing. If either check fails, stop and report the environment blocker.
 - Work only in the Symphony-created issue workspace. It is pinned to the source repository's `@-` revision at dispatch. Never edit the `prf-dev` source workspace, PRF's `agent-c-staging`, `integration`, protected refs, or another issue workspace.
 - Do not clone or reinitialize JJ metadata. Do not rebase, abandon, forget, rename, or clean existing workspaces. Preserve all candidate state.
-- Do not publish or push, and do not move `main`, `integration`, or a staging bookmark. This repository has no configured Symphony staging bookmark or candidate export path yet.
+- Do not publish or push, and do not move `main`, `integration`, `agent-c-staging`, or `symphony-staging`. This repository has no configured Symphony staging bookmark or candidate export path yet.
 - Only PRO-106 is authorized. Do not make changes to unrelated repositories or issue scopes.
 
 ## Work procedure
 
 1. Read the issue and its comments. Record the workspace's baseline change and commit IDs, repository root, and clean/dirty state in a persistent `## Codex Workpad` comment.
 2. Audit existing Python JJ guard code and current Symphony submission/review/staging receipts before changing code. Reuse existing controls; do not add a second scheduler, duplicate guard, identity service, or custom cryptography.
-3. Reproduce a focused behavior before implementation. Add narrow tests for the accepted and rejected cases from PRO-106. Do not claim tests or offline verification that were not run.
-4. Keep the implementation within this `prf-dev` workspace. Record exact commands and results, changed paths, candidate change/commit IDs, and any remaining limits in the Workpad.
-5. The standard PRF `jj_export_candidate.sh` and staging gate do not apply to this repository. Keep the issue In Progress and do not add `symphony-pilot-review` until a repository-specific independent review and staging handoff exists. Leave the workspace and all evidence intact for that handoff.
+3. Before editing, run the complete `prf-dev` test suite on the pinned baseline with `python3 -m unittest discover -s tests -v`. Record the exact revision, command, exit status, and failures in the Workpad. This establishes whether failures predate the candidate. Reproduce the issue with a focused test, then add narrow tests for the accepted and rejected cases from PRO-106.
+4. After implementation, rerun the complete suite with `python3 -m unittest discover -s tests -v`, as well as any focused checks needed for the acceptance criteria. Record exact commands, exit statuses, and pass/fail counts for both baseline and candidate. Do not hand off a candidate if any required check fails or was not run; report the failure and leave the issue In Progress. Do not claim tests or offline verification that were not run.
+5. Keep the implementation within this `prf-dev` workspace. Record changed paths, candidate change/commit IDs, and any remaining limits in the Workpad. A test run on the baseline does not qualify the candidate: all candidate checks must run after the final code changes.
+6. The standard PRF `jj_export_candidate.sh` and staging gate do not apply to this repository. Keep the issue In Progress and do not add `symphony-pilot-review` until a repository-specific independent review and staging handoff exists. Leave the workspace and all evidence intact for that handoff.

@@ -31,13 +31,21 @@ hooks:
   after_run: |
     set -eu
     if [ -f ./review-decision.json ]; then
+      $SYMPHONY_ELIXIR_ROOT/scripts/review_decision_record.sh ./review-decision.json
+    fi
+    $SYMPHONY_ELIXIR_ROOT/scripts/review_attempt_finish.sh
+    if [ -f ./review-decision.json ]; then
       SYMPHONY_REPO_CONFIG=$SYMPHONY_ELIXIR_ROOT/symphony-repos.json \
         python3 $SYMPHONY_ELIXIR_ROOT/symphony-stage-reviewed.py ./review-decision.json
     fi
 agent:
   max_concurrent_agents: 1
   max_turns: 1
+  max_continuation_retries: 0
 codex:
+  turn_timeout_ms: 720000
+  max_tool_calls_per_turn: 30
+  max_tokens_per_turn: 100000
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
   approval_policy: never
   stall_timeout_ms: 3900000
@@ -69,10 +77,13 @@ The `before_run` hook fetches `refs/remotes/producer/{{ issue.identifier }}` fro
 ## Review requirements
 
 1. Verify the exact candidate SHA, base SHA, repository identity and changed paths against the configured scope.
-2. Inspect the committed diff for correctness, fail-closed behavior, scope drift, generated artifacts, and any deployment/publishing/authority side effect.
-3. Run the configured validation commands in this checkout, plus any focused tests needed for the acceptance criteria. Record exact commands, pass/fail counts and exit status.
-4. Check cross-repository dependencies and pinned revisions named by the issue. A mismatched or unavailable dependency is a blocker; do not substitute.
-5. Keep limitations explicit. Do not claim public-chain, production, governance or owner approval that you did not independently observe.
+2. Inspect the issue's direct sub-issues. When reviewing a parent, read every child's full description, acceptance criteria, comments and blockers; verify the candidate and workpad against each child with a child-by-child evidence checklist. Do not require separate parent prose when the child tasks define the scope.
+3. Inspect the committed diff for correctness, fail-closed behavior, scope drift, generated artifacts, and any deployment/publishing/authority side effect.
+4. Run the configured validation commands in this checkout, plus any focused tests needed for the acceptance criteria. Record exact commands, pass/fail counts and exit status.
+5. Check cross-repository dependencies and pinned revisions named by the issue or its children. A mismatched or unavailable dependency is a blocker; do not substitute. For a parent, do not approve while any child acceptance item is unverified or any required child prerequisite remains unresolved.
+6. Keep limitations explicit. Do not claim public-chain, production, governance or owner approval that you did not independently observe.
+
+If the reviewed issue is a parent, confirm that the host repository configuration has an explicit allowed-path scope for the aggregate candidate. Child descriptions define implementation intent and acceptance; they do not replace the host's path allowlist. If no scope is configured, treat this as a host blocker and do not write an approval decision.
 
 ## Outcomes
 
@@ -84,4 +95,6 @@ The `before_run` hook fetches `refs/remotes/producer/{{ issue.identifier }}` fro
 {"schema":"symphony-pilot-review-decision.v1","issue":"{{ issue.identifier }}","verdict":"approved","candidate_sha":"<40 lowercase hex>","base_sha":"<40 lowercase hex>","reviewed_tests":["<exact command>"],"finding":"<substantive independent finding>"}
 ```
 
-Leave the issue `In Review`. The host `after_run` gate validates the decision, merges only the configured staging destination in a dedicated JJ workspace, runs the configured validation, checks ancestry, and only then moves the issue to `Done`. You do not mark Done directly.
+Leave the issue `In Review`. The host `after_run` hook runs the fast candidate screen and queues the approved candidate; it does not move `symphony-staging`, create an accepted staging receipt, or mark the issue Done. The operator batch-qualification command combines compatible candidates, runs configured full validation once, and only then advances `symphony-staging`, records accepted receipts, and marks those issues Done. Integration promotion remains separate.
+
+For a parent issue, the approved decision must establish that every direct child's acceptance criteria are met. The required final state is that all direct child issues and then the parent are `Done`, after the combined candidate passes host staging qualification. Do not represent open, canceled, or duplicate children as completed work.

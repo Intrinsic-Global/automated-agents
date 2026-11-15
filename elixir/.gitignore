@@ -49,6 +49,7 @@ __pycache__/
 .secrets
 .credentials
 status.txt
+status.md
 .codex/original-user-prompt.txt
 
 # Also ignore archive artifacts (built via "mix archive.build").

@@ -34,6 +34,8 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :agent_runner,
+      :runner_opts,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
       completed: MapSet.new(),
@@ -67,6 +69,8 @@ defmodule SymphonyElixir.Orchestrator do
           tick_timer_ref: nil,
           tick_token: nil,
           task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
+          agent_runner: Keyword.get(opts, :agent_runner, AgentRunner),
+          runner_opts: Keyword.get(opts, :runner_opts, []),
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
@@ -211,23 +215,41 @@ defmodule SymphonyElixir.Orchestrator do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
     else
-      attempt = Map.get(state.continuation_attempts, issue_id, 0) + 1
-      max_attempts = Config.settings!().agent.max_continuation_retries
+      prior_attempt = Map.get(state.continuation_attempts, issue_id, 0)
 
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check attempt=#{attempt} limit=#{max_attempts}")
+      case Workspace.record_continuation_attempt(running_entry.issue, prior_attempt) do
+        {:ok, attempt} ->
+          _ = Workspace.clear_failure_attempts(running_entry.issue)
+          max_attempts = Config.settings!().agent.max_continuation_retries
 
-      state
-      |> put_continuation_attempt(issue_id, attempt)
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue_url: running_entry.issue.url,
-        session_id: session_id,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+          Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check attempt=#{attempt} limit=#{max_attempts}")
+
+          state
+          |> put_continuation_attempt(issue_id, attempt)
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            issue_url: running_entry.issue.url,
+            session_id: session_id,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+
+        {:error, reason} ->
+          block_issue_from_entry(
+            state,
+            issue_id,
+            running_entry,
+            "unable to persist continuation budget: #{inspect(reason)}"
+          )
+      end
     end
+  end
+
+  defp handle_agent_down({:workspace_hook_skipped, reason}, state, issue_id, running_entry, session_id) do
+    Logger.info("Agent dispatch skipped before Codex for #{issue_context(running_entry.issue)} session_id=#{session_id} reason=#{inspect(reason)}")
+    release_issue_claim(state, issue_id)
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
@@ -774,7 +796,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp continuation_limit_reached?(%State{} = state, issue_id) do
-    Map.get(state.continuation_attempts, issue_id, 0) >
+    max(
+      Map.get(state.continuation_attempts, issue_id, 0),
+      Workspace.continuation_attempts(issue_id)
+    ) >
       Config.settings!().agent.max_continuation_retries
   end
 
@@ -841,9 +866,56 @@ defmodule SymphonyElixir.Orchestrator do
            eligible_for_dispatch?(issue) do
         dispatch_issue(state_acc, issue)
       else
+        log_dispatch_skip(issue, state_acc, active_states, terminal_states)
         state_acc
       end
     end)
+  end
+
+  defp log_dispatch_skip(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
+    if active_issue_state?(issue.state, active_states) and
+         !terminal_issue_state?(issue.state, terminal_states) do
+      log_dispatch_reason(issue, dispatch_skip_reason(issue, state))
+    end
+  end
+
+  defp dispatch_skip_reason(issue, state) do
+    issue_gate_reason(issue) || ownership_gate_reason(issue, state) || capacity_gate_reason(issue, state)
+  end
+
+  defp issue_gate_reason(issue) do
+    if issue_routable?(issue), do: nil, else: "missing_label_or_required_issue_fields"
+  end
+
+  defp ownership_gate_reason(issue, state) do
+    cond do
+      MapSet.member?(state.claimed, issue.id) ->
+        "already_claimed"
+
+      Map.has_key?(state.running, issue.id) ->
+        "already_running"
+
+      Map.has_key?(state.blocked, issue.id) or Workspace.quarantined_issue?(issue) ->
+        "quarantined_or_blocked"
+
+      true ->
+        nil
+    end
+  end
+
+  defp capacity_gate_reason(issue, state) do
+    cond do
+      available_slots(state) == 0 -> "no_worker_capacity"
+      !state_slots_available?(issue, state.running) -> "no_state_capacity"
+      !worker_slots_available?(state) -> "no_worker_capacity"
+      true -> nil
+    end
+  end
+
+  defp log_dispatch_reason(_issue, nil), do: :ok
+
+  defp log_dispatch_reason(issue, reason) do
+    Logger.info("Dispatch skipped #{issue_context(issue)} reason_code=#{reason}")
   end
 
   defp eligible_for_dispatch?(%Issue{} = issue) do
@@ -855,7 +927,8 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     case Eligibility.check(issue, phase) do
-      {:ok, %{"status" => "eligible"}} ->
+      {:ok, %{"status" => "eligible"} = result} ->
+        log_eligibility_warnings(issue, phase, result)
         true
 
       {:ok, %{"status" => status} = result} ->
@@ -868,6 +941,12 @@ defmodule SymphonyElixir.Orchestrator do
 
         false
     end
+  end
+
+  defp log_eligibility_warnings(%Issue{} = issue, phase, result) do
+    Enum.each(Map.get(result, "warnings", []), fn warning ->
+      Logger.info("Eligibility notice for #{issue_context(issue)} phase=#{phase}: #{warning}")
+    end)
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -1016,21 +1095,46 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
-    recipient = self()
+    continuation_exceeded? =
+      Workspace.continuation_attempts(issue) > Config.settings!().agent.max_continuation_retries
 
-    case select_worker_host(state, preferred_worker_host) do
-      :no_worker_capacity ->
-        Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        state
+    failure_exceeded? =
+      Workspace.failure_attempts(issue) > Config.settings!().agent.max_failure_retries
 
-      worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+    cond do
+      continuation_exceeded? ->
+        metadata = %{identifier: issue.identifier, worker_host: preferred_worker_host}
+        block_continuation_limit_retry(state, issue, metadata) |> elem(1)
+
+      failure_exceeded? ->
+        block_issue_from_entry(
+          state,
+          issue.id,
+          %{issue: issue, identifier: issue.identifier, worker_host: preferred_worker_host},
+          "failure retry limit reached after #{Config.settings!().agent.max_failure_retries} retries; reconciliation required"
+        )
+
+      true ->
+        recipient = self()
+
+        case select_worker_host(state, preferred_worker_host) do
+          :no_worker_capacity ->
+            Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+            state
+
+          worker_host ->
+            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        end
     end
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           state.agent_runner.run(
+             issue,
+             recipient,
+             [attempt: attempt, worker_host: worker_host] ++ state.runner_opts
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1118,10 +1222,34 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_failure(%State{} = state, issue_id, attempt, metadata, issue_entry)
        when is_binary(issue_id) and is_map(metadata) and is_map(issue_entry) do
-    retry_number = if is_integer(attempt) and attempt > 0, do: attempt, else: 1
+    requested_retry_number = if is_integer(attempt) and attempt > 0, do: attempt, else: 1
     max_retries = Config.settings!().agent.max_failure_retries
     error = metadata[:error] || "agent attempt failed"
+    issue_or_identifier = Map.get(issue_entry, :issue) || Map.get(issue_entry, :identifier, issue_id)
 
+    case Workspace.record_failure_attempt(issue_or_identifier, requested_retry_number - 1) do
+      {:error, reason} ->
+        quarantine_failure(
+          state,
+          issue_id,
+          issue_entry,
+          "unable to persist failure retry budget: #{inspect(reason)}"
+        )
+
+      {:ok, retry_number} ->
+        apply_failure_retry_budget(
+          state,
+          issue_id,
+          retry_number,
+          metadata,
+          issue_entry,
+          max_retries,
+          error
+        )
+    end
+  end
+
+  defp apply_failure_retry_budget(state, issue_id, retry_number, metadata, issue_entry, max_retries, error) do
     cond do
       non_retryable_failure?(error) ->
         quarantine_failure(state, issue_id, issue_entry, "non-retryable host failure: #{error}")
@@ -1414,6 +1542,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
+    _ = Workspace.clear_continuation_attempts(issue_id)
+    _ = Workspace.clear_failure_attempts(issue_id)
+
     %{
       state
       | claimed: MapSet.delete(state.claimed, issue_id),

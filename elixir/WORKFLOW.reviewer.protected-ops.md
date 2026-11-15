@@ -31,13 +31,21 @@ hooks:
   after_run: |
     set -eu
     if [ -f ./review-decision.json ]; then
+      $SYMPHONY_ELIXIR_ROOT/scripts/review_decision_record.sh ./review-decision.json
+    fi
+    $SYMPHONY_ELIXIR_ROOT/scripts/review_attempt_finish.sh
+    if [ -f ./review-decision.json ]; then
       SYMPHONY_REPO_CONFIG=$SYMPHONY_ELIXIR_ROOT/symphony-repos.json \
         python3 $SYMPHONY_ELIXIR_ROOT/symphony-stage-reviewed.py ./review-decision.json
     fi
 agent:
   max_concurrent_agents: 1
   max_turns: 1
+  max_continuation_retries: 0
 codex:
+  turn_timeout_ms: 720000
+  max_tool_calls_per_turn: 30
+  max_tokens_per_turn: 100000
   command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
   approval_policy: never
   stall_timeout_ms: 3900000
@@ -84,4 +92,4 @@ The `before_run` hook fetches `refs/remotes/producer/{{ issue.identifier }}` fro
 {"schema":"symphony-pilot-review-decision.v1","issue":"{{ issue.identifier }}","verdict":"approved","candidate_sha":"<40 lowercase hex>","base_sha":"<40 lowercase hex>","reviewed_tests":["<exact command>"],"finding":"<substantive independent finding>"}
 ```
 
-Leave the issue `In Review`. The host `after_run` gate validates the decision, merges only the configured staging destination in a dedicated JJ workspace, runs the configured validation, checks ancestry, and only then moves the issue to `Done`. You do not mark Done directly.
+Leave the issue `In Review`. The host `after_run` hook runs the fast candidate screen and queues the approved candidate; it does not move `symphony-staging`, create an accepted staging receipt, or mark the issue Done. The operator batch-qualification command combines compatible candidates, runs configured full validation once, and only then advances `symphony-staging`, records accepted receipts, and marks those issues Done. Integration promotion remains separate.

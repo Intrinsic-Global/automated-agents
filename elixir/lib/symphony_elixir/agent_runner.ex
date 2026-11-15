@@ -29,6 +29,9 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      {:skipped, reason} ->
+        exit({:workspace_hook_skipped, reason})
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -42,12 +45,19 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+        case Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          :ok ->
+            try do
+              run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            after
+              Workspace.run_after_run_hook(workspace, issue, worker_host)
+            end
+
+          {:skip, reason} ->
+            {:skipped, reason}
+
+          {:error, reason} ->
+            {:error, reason}
         end
 
       {:error, reason} ->

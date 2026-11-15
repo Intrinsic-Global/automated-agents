@@ -11,8 +11,8 @@ defmodule SymphonyElixir.Linear.Client do
   @max_error_body_log_bytes 1_000
 
   @query """
-  query SymphonyLinearPoll($projectSlugs: [String!], $issueIdentifiers: [String!], $excludedIssueIdentifiers: [String!], $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
-    issues(filter: {project: {slugId: {in: $projectSlugs}}, identifier: {in: $issueIdentifiers, nin: $excludedIssueIdentifiers}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
+  query SymphonyLinearPoll($projectSlugs: [String!], $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: {project: {slugId: {in: $projectSlugs}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
       nodes {
         id
         identifier
@@ -56,8 +56,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlugs: [String!], $issueIdentifiers: [String!], $excludedIssueIdentifiers: [String!], $first: Int!, $relationFirst: Int!) {
-    issues(filter: {id: {in: $ids}, project: {slugId: {in: $projectSlugs}}, identifier: {in: $issueIdentifiers, nin: $excludedIssueIdentifiers}}, first: $first) {
+  query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlugs: [String!], $first: Int!, $relationFirst: Int!) {
+    issues(filter: {id: {in: $ids}, project: {slugId: {in: $projectSlugs}}}, first: $first) {
       nodes {
         id
         identifier
@@ -225,6 +225,12 @@ defmodule SymphonyElixir.Linear.Client do
   def scoped_poll_query_for_test(scope) when is_map(scope), do: project_scoped_query(@query, scope)
 
   @doc false
+  @spec filter_issue_identifier_scope_for_test([Issue.t()], map()) :: [Issue.t()]
+  def filter_issue_identifier_scope_for_test(issues, scope) when is_list(issues) and is_map(scope) do
+    filter_issues_by_identifier_scope(issues, scope)
+  end
+
+  @doc false
   @spec fetch_issues_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids_for_test(issue_ids, graphql_fun)
@@ -270,7 +276,7 @@ defmodule SymphonyElixir.Linear.Client do
           do_fetch_by_states_page(project_scope, state_names, assignee_filter, next_cursor, updated_acc)
 
         :done ->
-          {:ok, finalize_paginated_issues(updated_acc)}
+          {:ok, updated_acc |> finalize_paginated_issues() |> filter_issues_by_identifier_scope(project_scope)}
 
         {:error, reason} ->
           {:error, reason}
@@ -294,10 +300,11 @@ defmodule SymphonyElixir.Linear.Client do
     do_fetch_issue_states_page(ids, project_scope, assignee_filter, graphql_fun, [], issue_order_index)
   end
 
-  defp do_fetch_issue_states_page([], _project_scope, _assignee_filter, _graphql_fun, acc_issues, issue_order_index) do
+  defp do_fetch_issue_states_page([], project_scope, _assignee_filter, _graphql_fun, acc_issues, issue_order_index) do
     acc_issues
     |> finalize_paginated_issues()
     |> sort_issues_by_requested_ids(issue_order_index)
+    |> filter_issues_by_identifier_scope(project_scope)
     |> then(&{:ok, &1})
   end
 
@@ -628,30 +635,43 @@ defmodule SymphonyElixir.Linear.Client do
 
     {query, variables} =
       case scope do
-        %{issue_identifiers: [_ | _] = identifiers} ->
+        %{issue_identifiers: [_ | _]} ->
           query =
             query
             |> String.replace("$projectSlugs: [String!], ", "")
             |> String.replace("project: {slugId: {in: $projectSlugs}}, ", "")
             |> String.replace("project: {slugId: {nin: $projectSlugs}}, ", "")
 
-          {query, variables |> Map.delete(:projectSlugs) |> Map.put(:issueIdentifiers, identifiers)}
+          {query, Map.delete(variables, :projectSlugs)}
 
         _ ->
           {query, variables}
       end
 
-    variables =
-      case scope do
-        %{excluded_issue_identifiers: [_ | _] = identifiers} ->
-          Map.put(variables, :excludedIssueIdentifiers, identifiers)
-
-        _ ->
-          variables
-      end
-
     {query, variables}
   end
+
+  defp filter_issues_by_identifier_scope(issues, scope) do
+    included = normalize_identifier_scope(Map.get(scope, :issue_identifiers, []))
+    excluded = normalize_identifier_scope(Map.get(scope, :excluded_issue_identifiers, []))
+
+    Enum.filter(issues, fn
+      %Issue{identifier: identifier} when is_binary(identifier) ->
+        normalized = String.upcase(identifier)
+        (included == [] or normalized in included) and normalized not in excluded
+
+      _ ->
+        false
+    end)
+  end
+
+  defp normalize_identifier_scope(values) when is_list(values) do
+    values
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&(String.trim(&1) |> String.upcase()))
+  end
+
+  defp normalize_identifier_scope(_values), do: []
 
   defp build_assignee_filter(assignee) when is_binary(assignee) do
     case normalize_assignee_match_value(assignee) do

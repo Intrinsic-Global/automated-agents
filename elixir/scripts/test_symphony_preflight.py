@@ -11,8 +11,8 @@ import symphony_preflight as preflight
 
 
 def workflow(role='coding', labels=None, states=None, projects=None):
-    reviewer = role.startswith('reviewer')
-    if role in ('coding', 'reviewer'):
+    reviewer = role.startswith('reviewer') or role == 'integration-reviewer'
+    if role in ('coding', 'reviewer', 'integration-reviewer'):
         provider_scope = {
             'excluded_project_slugs': sorted(preflight.DEDICATED_PROJECT_SLUGS),
             'excluded_issue_identifiers': ['PRO-106'],
@@ -29,7 +29,9 @@ def workflow(role='coding', labels=None, states=None, projects=None):
                 'api_key': '$LINEAR_API_KEY',
             },
             'required_labels': labels or (
-                ['symphony-pilot', 'symphony-pilot-review'] if reviewer else ['symphony-pilot']
+                ['symphony-integration', 'symphony-integration-review']
+                if role == 'integration-reviewer'
+                else ['symphony-pilot', 'symphony-pilot-review'] if reviewer else ['symphony-pilot']
             ),
             'active_states': states or (['In Review'] if reviewer else ['Todo', 'In Progress']),
         },
@@ -55,6 +57,15 @@ class SymphonyPreflightTest(unittest.TestCase):
         preflight.validate_config('reviewer', workflow('reviewer'))
         with self.assertRaisesRegex(ValueError, 'symphony-pilot-review'):
             preflight.validate_config('reviewer', workflow('reviewer', labels=['symphony-pilot']))
+
+    def test_integration_reviewer_uses_its_own_review_queue(self):
+        config = preflight.load_workflow(Path(__file__).resolve().parent.parent / 'WORKFLOW.integration-reviewer.md')
+        preflight.validate_config('integration-reviewer', config)
+        with self.assertRaisesRegex(ValueError, 'symphony-integration-review'):
+            preflight.validate_config(
+                'integration-reviewer',
+                workflow('integration-reviewer', labels=['symphony-integration']),
+            )
 
     def test_coding_lane_rejects_review_only_state(self):
         with self.assertRaisesRegex(ValueError, 'active states'):

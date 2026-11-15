@@ -106,10 +106,12 @@ defmodule SymphonyElixir.Codex.AppServer do
            port,
            thread_id,
            prompt,
-           issue,
-           workspace,
-           approval_policy,
-           turn_sandbox_policy,
+           %{
+             issue: issue,
+             workspace: workspace,
+             approval_policy: approval_policy,
+             turn_sandbox_policy: turn_sandbox_policy
+           },
            on_message,
            metadata
          ) do
@@ -367,10 +369,12 @@ defmodule SymphonyElixir.Codex.AppServer do
          port,
          thread_id,
          prompt,
-         issue,
-         workspace,
-         approval_policy,
-         turn_sandbox_policy,
+         %{
+           issue: issue,
+           workspace: workspace,
+           approval_policy: approval_policy,
+           turn_sandbox_policy: turn_sandbox_policy
+         },
          on_message,
          metadata
        ) do
@@ -400,15 +404,16 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
     deadline = System.monotonic_time(:millisecond) + Config.settings!().codex.turn_timeout_ms
+    Process.put({__MODULE__, :turn_tool_calls}, 0)
+    Process.put({__MODULE__, :repeated_tool_results}, %{})
 
-    receive_loop(
-      port,
-      on_message,
-      deadline,
-      "",
-      tool_executor,
-      auto_approve_requests
-    )
+    try do
+      receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
+    after
+      Process.delete({__MODULE__, :turn_tool_calls})
+      Process.delete({__MODULE__, :repeated_tool_results})
+      Process.delete({__MODULE__, :turn_reported_tokens})
+    end
   end
 
   defp receive_loop(port, on_message, deadline, pending_line, tool_executor, auto_approve_requests) do
@@ -453,36 +458,59 @@ defmodule SymphonyElixir.Codex.AppServer do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
-      {:ok, %{"method" => "turn/completed"} = payload} ->
+      {:ok, payload} ->
+        handle_decoded_incoming(
+          port,
+          on_message,
+          payload,
+          payload_string,
+          deadline,
+          tool_executor,
+          auto_approve_requests
+        )
+
+      {:error, _reason} ->
+        handle_malformed_incoming(
+          port,
+          on_message,
+          payload_string,
+          deadline,
+          tool_executor,
+          auto_approve_requests
+        )
+    end
+  end
+
+  defp handle_decoded_incoming(port, on_message, %{"method" => "turn/completed"} = payload, payload_string, _deadline, _tool_executor, _auto_approve_requests) do
+    case account_token_usage(payload) do
+      :ok ->
         emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
         {:ok, :turn_completed}
 
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_failed,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+  defp handle_decoded_incoming(port, on_message, %{"method" => method, "params" => params} = payload, payload_string, _deadline, _tool_executor, _auto_approve_requests)
+       when method in ["turn/failed", "turn/cancelled"] do
+    event = if method == "turn/failed", do: :turn_failed, else: :turn_cancelled
+    emit_turn_event(on_message, event, payload, payload_string, port, params)
+    {:error, {event, params}}
+  end
 
-      {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_cancelled,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
-
-        {:error, {:turn_cancelled, Map.get(payload, "params")}}
-
-      {:ok, %{"method" => method} = payload}
-      when is_binary(method) ->
+  defp handle_decoded_incoming(
+         port,
+         on_message,
+         %{"method" => method} = payload,
+         payload_string,
+         deadline,
+         tool_executor,
+         auto_approve_requests
+       )
+       when is_binary(method) do
+    case {account_token_usage(payload), account_tool_call(method, payload)} do
+      {:ok, :ok} ->
         handle_turn_method(
           port,
           on_message,
@@ -494,40 +522,57 @@ defmodule SymphonyElixir.Codex.AppServer do
           auto_approve_requests
         )
 
-      {:ok, payload} ->
-        emit_message(
-          on_message,
-          :other_message,
-          %{
-            payload: payload,
-            raw: payload_string
-          },
-          metadata_from_message(port, payload)
-        )
+      {{:error, reason}, _} ->
+        {:error, reason}
 
-        receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
-
-      {:error, _reason} ->
-        log_non_json_stream_line(
-          payload_string,
-          "turn stream",
-          stream_log_handler(on_message, "turn", metadata_from_message(port, %{}))
-        )
-
-        if protocol_message_candidate?(payload_string) do
-          emit_message(
-            on_message,
-            :malformed,
-            %{
-              payload: payload_string,
-              raw: payload_string
-            },
-            metadata_from_message(port, %{raw: payload_string})
-          )
-        end
-
-        receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
+      {_, {:error, reason}} ->
+        {:error, reason}
     end
+  end
+
+  defp handle_decoded_incoming(
+         port,
+         on_message,
+         payload,
+         payload_string,
+         deadline,
+         tool_executor,
+         auto_approve_requests
+       ) do
+    emit_message(
+      on_message,
+      :other_message,
+      %{payload: payload, raw: payload_string},
+      metadata_from_message(port, payload)
+    )
+
+    receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
+  end
+
+  defp handle_malformed_incoming(
+         port,
+         on_message,
+         payload_string,
+         deadline,
+         tool_executor,
+         auto_approve_requests
+       ) do
+    log_non_json_stream_line(
+      payload_string,
+      "turn stream",
+      stream_log_handler(on_message, "turn", metadata_from_message(port, %{}))
+    )
+
+    if protocol_message_candidate?(payload_string) do
+      emit_message(
+        on_message,
+        :malformed,
+        %{payload: payload_string, raw: payload_string},
+        metadata_from_message(port, %{raw: payload_string})
+      )
+    end
+
+    receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
   end
 
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
@@ -577,6 +622,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       :approved ->
         receive_loop(port, on_message, deadline, "", tool_executor, auto_approve_requests)
+
+      {:tool_loop, tool_name} ->
+        {:error, {:repeated_tool_call_result, tool_name}}
 
       :approval_required ->
         emit_message(
@@ -660,6 +708,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       "result" => result
     })
 
+    repeated_result? = record_tool_result(tool_name, arguments, result)
+
     event =
       case result do
         %{"success" => true} -> :tool_call_completed
@@ -669,7 +719,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     emit_message(on_message, event, %{payload: payload, raw: payload_string}, metadata)
 
-    :approved
+    if repeated_result?, do: {:tool_loop, tool_name}, else: :approved
   end
 
   defp maybe_handle_approval_request(
@@ -771,6 +821,75 @@ defmodule SymphonyElixir.Codex.AppServer do
          _auto_approve_requests
        ) do
     :unhandled
+  end
+
+  defp account_tool_call(method, payload) do
+    params = Map.get(payload, "params", %{})
+
+    tool_event? =
+      method == "item/tool/call" or
+        (method == "item/started" and get_in(params, ["item", "type"]) == "commandExecution")
+
+    if tool_event? do
+      count = Process.get({__MODULE__, :turn_tool_calls}, 0) + 1
+      Process.put({__MODULE__, :turn_tool_calls}, count)
+      limit = Config.settings!().codex.max_tool_calls_per_turn
+
+      if count > limit do
+        {:error, {:tool_call_limit_exceeded, limit}}
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp account_token_usage(payload) do
+    limit = Config.settings!().codex.max_tokens_per_turn
+    reported = reported_total_tokens(payload)
+    previous = Process.get({__MODULE__, :turn_reported_tokens}, 0)
+    total = max(previous, reported || 0)
+    Process.put({__MODULE__, :turn_reported_tokens}, total)
+
+    if limit > 0 and total > limit do
+      {:error, {:token_limit_exceeded, limit, total}}
+    else
+      :ok
+    end
+  end
+
+  defp reported_total_tokens(payload) do
+    usage =
+      [
+        get_in(payload, ["params", "tokenUsage", "total"]),
+        get_in(payload, ["params", "msg", "payload", "info", "total_token_usage"]),
+        get_in(payload, ["params", "msg", "info", "total_token_usage"]),
+        get_in(payload, ["params", "usage"]),
+        Map.get(payload, "usage")
+      ]
+      |> Enum.find_value(& &1)
+
+    cond do
+      is_integer(usage) ->
+        usage
+
+      is_map(usage) ->
+        Map.get(usage, "total_tokens") || Map.get(usage, "totalTokens") || Map.get(usage, "total")
+
+      true ->
+        nil
+    end
+  end
+
+  defp record_tool_result(tool_name, arguments, result) do
+    fingerprint =
+      :crypto.hash(:sha256, Jason.encode!([tool_name, arguments, result]))
+
+    seen = Process.get({__MODULE__, :repeated_tool_results}, %{})
+    count = Map.get(seen, fingerprint, 0) + 1
+    Process.put({__MODULE__, :repeated_tool_results}, Map.put(seen, fingerprint, count))
+    count >= 3
   end
 
   defp normalize_dynamic_tool_result(%{"success" => success} = result) when is_boolean(success) do
