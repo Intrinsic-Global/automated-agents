@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -31,6 +30,7 @@ MANIFEST_FIELDS = {
     "target_tree", "reviewed_commits", "issues", "staging_record", "staging_sha256",
 }
 VALIDATION_FIELDS = {"command", "status", "tree", "ref", "sha256"}
+REQUIRED_INTEGRATION_VALIDATION = {"bb validate", "bb backstop"}
 
 
 class ReviewError(Exception):
@@ -56,9 +56,26 @@ def resolve(repo: Path, revision: str) -> str:
     return value
 
 
+def git_root(repo: Path) -> Path:
+    """Find the backing Git worktree for a JJ workspace or repo root."""
+    if (repo / ".git").exists():
+        return repo
+    pointer = repo / ".jj" / "repo"
+    if pointer.is_file():
+        store = (pointer.parent / pointer.read_text(encoding="utf-8").strip()).resolve()
+    elif pointer.is_dir():
+        store = pointer.resolve()
+    else:
+        raise ReviewError(f"JJ repository has no backing store: {repo}")
+    for candidate in (store.parent.parent, *store.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    raise ReviewError(f"JJ repository has no discoverable backing Git worktree: {repo}")
+
+
 def tree(repo: Path, commit: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", f"{commit}^{{tree}}"],
+        ["git", "-C", str(git_root(repo)), "rev-parse", f"{commit}^{{tree}}"],
         check=False,
         capture_output=True,
         text=True,
@@ -140,6 +157,17 @@ def validate_staging_record(path: Path, manifest: dict) -> tuple[dict, list[dict
     executions = stage.get("validation_evidence")
     if not isinstance(executions, list) or not executions:
         raise ReviewError("aggregate staging qualification lacks validation execution receipts")
+    recorded_commands = {
+        execution["command"]
+        for execution in executions
+        if isinstance(execution, dict) and isinstance(execution.get("command"), str)
+    }
+    missing_commands = REQUIRED_INTEGRATION_VALIDATION - recorded_commands
+    if missing_commands:
+        raise ReviewError(
+            "exact integration candidate requires full validation commands: "
+            + ", ".join(sorted(missing_commands))
+        )
     normalized = []
     for execution in executions:
         if (not isinstance(execution, dict) or set(execution) != VALIDATION_FIELDS
@@ -168,10 +196,13 @@ def validate_staging_record(path: Path, manifest: dict) -> tuple[dict, list[dict
 
 
 def write_exclusive(path: Path, document: dict) -> None:
+    write_exclusive_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+
+
+def write_exclusive_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or path.exists():
         raise ReviewError(f"refusing to overwrite an existing or symlinked evidence file: {path}")
-    payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as output:
@@ -232,6 +263,23 @@ def context(args: argparse.Namespace) -> dict:
     prior_record = args.review_root / "records" / f"{args.issue}.json"
     if prior_decision.exists() or prior_record.exists():
         raise ReviewError("this integration review already has a retained decision; do not spend another turn")
+    workspace = args.workspace.expanduser().resolve(strict=True)
+    diff_result = subprocess.run(
+        ["git", "-C", str(git_root(Path(manifest["repo"]))), "diff", "--no-ext-diff",
+         "--no-renames", manifest["target_commit"], manifest["source_commit"]],
+        check=False, capture_output=True,
+    )
+    if diff_result.returncode:
+        raise ReviewError("cannot materialize the exact candidate diff")
+    diff = diff_result.stdout
+    diff_path = workspace / "candidate.diff"
+    write_exclusive_bytes(diff_path, diff)
+    source_record = Path(manifest["staging_record"])
+    staging_copy = source_record.read_bytes()
+    if hashlib.sha256(staging_copy).hexdigest() != manifest["staging_sha256"]:
+        raise ReviewError("aggregate staging qualification changed while preparing reviewer inputs")
+    staging_path = workspace / "staging-admission.json"
+    write_exclusive_bytes(staging_path, staging_copy)
     context_doc = {
         "schema": manifest["schema"],
         "issue": manifest["issue"],
@@ -244,14 +292,12 @@ def context(args: argparse.Namespace) -> dict:
         "issues": manifest["issues"],
         "qualified_tree": manifest["source_tree"],
         "staging_qualification_sha256": manifest["staging_sha256"],
-        "diff_command": (
-            f"jj --ignore-working-copy -R {shlex.quote(manifest['repo'])} diff "
-            f'--from {manifest["target_commit"]} --to {manifest["source_commit"]}'
-        ),
+        "candidate_diff": "candidate.diff",
+        "candidate_diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "staging_admission": "staging-admission.json",
+        "staging_qualification_sha256": manifest["staging_sha256"],
     }
-    output = args.workspace / "review-context.json"
-    if output.is_symlink():
-        raise ReviewError("review context output cannot be a symlink")
+    output = workspace / "review-context.json"
     output.write_text(json.dumps(context_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {"status": "ready", "context": str(output)}
 

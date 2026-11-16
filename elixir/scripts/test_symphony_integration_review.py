@@ -68,9 +68,9 @@ class IntegrationReviewHandoffTest(unittest.TestCase):
             "source_tree": review.tree(self.repo, self.source), "target_tree": review.tree(self.repo, self.target),
             "included_commits": review.exact_range(self.repo, self.target, self.source), "issues": issues,
             "validation_evidence": [{
-                "command": "bb backstop", "status": "passed", "tree": review.tree(self.repo, self.source),
+                "command": command, "status": "passed", "tree": review.tree(self.repo, self.source),
                 "ref": str(self.validation_path), "sha256": hashlib.sha256(self.validation_path.read_bytes()).hexdigest(),
-            }],
+            } for command in ("bb validate", "bb backstop")],
         }), encoding="utf-8")
         return review.prepare(Namespace(
             issue=self.issue, repo=self.repo, source_commit=self.source, target_ref="integration",
@@ -84,10 +84,21 @@ class IntegrationReviewHandoffTest(unittest.TestCase):
 
         workspace = self.root / "reviewer"
         workspace.mkdir()
-        context = review.context(Namespace(
-            issue=self.issue, repo=self.repo, review_root=self.review_root, workspace=workspace,
-        ))
+        with patch("symphony_integration_review.subprocess.run", wraps=subprocess.run) as run_spy:
+            context = review.context(Namespace(
+                issue=self.issue, repo=self.repo, review_root=self.review_root, workspace=workspace,
+            ))
         self.assertEqual("ready", context["status"])
+        context_doc = json_load(workspace / "review-context.json")
+        self.assertEqual("candidate.diff", context_doc["candidate_diff"])
+        self.assertEqual("staging-admission.json", context_doc["staging_admission"])
+        candidate_diff = (workspace / context_doc["candidate_diff"]).read_bytes()
+        self.assertEqual(hashlib.sha256(candidate_diff).hexdigest(), context_doc["candidate_diff_sha256"])
+        git_diff_calls = [call.args[0] for call in run_spy.call_args_list if "diff" in call.args[0]]
+        self.assertTrue(git_diff_calls)
+        self.assertFalse(any("--unified=0" in args for args in git_diff_calls))
+        staging_copy = (workspace / context_doc["staging_admission"]).read_bytes()
+        self.assertEqual(manifest["staging_sha256"], hashlib.sha256(staging_copy).hexdigest())
 
         decision = {
             "schema": "symphony.integration-review-decision.v1",
@@ -114,6 +125,42 @@ class IntegrationReviewHandoffTest(unittest.TestCase):
         self.assertEqual("prf-dev.integration-review.v1", record["schema"])
         self.assertEqual(manifest["reviewed_commits"], record["reviewed_commits"])
         self.assertEqual(manifest["issues"], record["issues"])
+
+    def test_prepare_and_context_accept_a_jj_workspace_path(self):
+        workspace = self.root / "workspace"
+        run(["jj", "-R", str(self.repo), "workspace", "add", "--name", "review-workspace",
+             "--revision", self.source, str(workspace)])
+        stage_path = self.root / "workspace-staging.json"
+        source_tree = review.tree(self.repo, self.source)
+        target_tree = review.tree(self.repo, self.target)
+        stage_path.write_text(json.dumps({
+            "schema": "prf-dev.staging-admission.v1", "status": "admitted",
+            "source_commit": self.source, "target_commit": self.target,
+            "source_tree": source_tree, "target_tree": target_tree,
+            "included_commits": review.exact_range(self.repo, self.target, self.source),
+            "issues": ["PRO-101"],
+            "validation_evidence": [{
+                "command": command, "status": "passed", "tree": source_tree,
+                "ref": str(self.validation_path),
+                "sha256": hashlib.sha256(self.validation_path.read_bytes()).hexdigest(),
+            } for command in ("bb validate", "bb backstop")],
+        }), encoding="utf-8")
+
+        prepared = review.prepare(Namespace(
+            issue=self.issue, repo=workspace, source_commit=self.source, target_ref="integration",
+            issues=["PRO-101"], staging_record=stage_path, review_root=self.review_root,
+        ))
+        self.assertEqual("prepared", prepared["status"])
+        self.assertEqual(str(workspace.resolve()), self.manifest()["repo"])
+
+        reviewer = self.root / "reviewer-workspace"
+        reviewer.mkdir()
+        context = review.context(Namespace(
+            issue=self.issue, repo=workspace, review_root=self.review_root, workspace=reviewer,
+        ))
+        self.assertEqual("ready", context["status"])
+        self.assertTrue((reviewer / "candidate.diff").is_file())
+        self.assertTrue((reviewer / "staging-admission.json").is_file())
 
     def test_record_rejects_decision_for_a_different_candidate(self):
         self.prepare(["PRO-101"])

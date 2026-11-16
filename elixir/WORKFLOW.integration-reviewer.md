@@ -47,10 +47,10 @@ agent:
   max_continuation_retries: 0
   max_failure_retries: 0
 codex:
-  turn_timeout_ms: 720000
-  max_tool_calls_per_turn: 30
-  max_tokens_per_turn: 50000
-  command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=medium app-server
+  turn_timeout_ms: 1200000
+  max_tool_calls_per_turn: 50
+  max_tokens_per_turn: 100000
+  command: $CODEX_BIN --config 'model="gpt-6-luna"' --config model_reasoning_effort=low --config mcp_servers.linear.enabled=false --config mcp_servers.clojure-mcp.enabled=false app-server
   approval_policy: never
   stall_timeout_ms: 3900000
   thread_sandbox: workspace-write
@@ -61,15 +61,34 @@ codex:
 # PRF integration reviewer — {{ issue.identifier }}
 
 You are the independent reviewer for one assembled PRF staging candidate. This is a distinct
-integration review, not an issue implementation review. The host prepared `review-context.json`
-from an immutable candidate commit and the current `integration` target. If that context is absent,
+integration review, not an issue implementation review. The host prepared `review-context.json`,
+`candidate.diff`, and `staging-admission.json` from an immutable candidate commit and the current
+`integration` target. Your checkout being clean at its base is expected: the candidate is supplied
+as a diff and immutable commit IDs, not as uncommitted workspace changes. If any input is absent,
 stale, malformed, or the candidate does not descend from the target, stop without approval.
 
-Read the issue description and `review-context.json`. Review every commit in `reviewed_commits`
-and the combined diff. Use the context's exact commit IDs; do not review moving staging bookmarks.
-Inspect the diff with the supplied `diff_command`, then inspect relevant file contents and tests
-using read-only JJ commands. Consider cross-issue interactions, missed acceptance criteria,
+Use the issue's acceptance criteria and scope; do not reread unrelated issue history or comments.
+Read `review-context.json`, then verify the SHA-256 of `candidate.diff` and `staging-admission.json`
+without printing either file in full. The admission record is qualification evidence: inspect only
+the fields needed to confirm the exact source/target trees, commit range, issue set, and validation
+receipts. Host-only evidence paths in that record are not expected to exist in this workspace.
+
+Use the context's exact commit IDs; do not review moving staging bookmarks. The supplied diff
+includes normal surrounding context and is an index into the exact candidate, not a substitute for
+source inspection. First collect a diff stat and changed-path list. Review the combined candidate
+by changed file in bounded groups, using focused hunks and relevant tests at those exact commits
+with read-only JJ commands. Inspect additional nearby source for contracts and invariants as needed.
+Never load or print the entire `candidate.diff` or an entire large changed file into one result. For generated
+vectors and manifests, inspect changed entries and their generator/check coverage instead of
+rereading unchanged corpus content. Consider cross-issue interactions, missed acceptance criteria,
 regressions, security, data migrations, and whether the exact combined candidate is coherent.
+
+Treat the configured 100,000-token turn limit as a hard ceiling. Reserve at least 20,000 tokens for
+cross-checking the candidate identity and writing the decision. Keep a compact private checklist of
+reviewed paths and findings; avoid repeating tool output or evidence already captured. If the
+remaining budget is insufficient to review the changed paths and relevant tests, stop and return
+`BLOCKED` with the uncovered paths and reason. Do not issue a partial `PASS` or start another turn
+with an inherited transcript to evade the limit.
 The staging qualification and integration preflight are separate host gates; do not claim they
 passed unless the evidence is present and binds this exact tree.
 
